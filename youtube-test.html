@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Audio Extractor Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 800px;
+            width: 100%;
+            padding: 40px;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .input-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            color: #333;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        
+        input[type="text"] {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+        
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: transform 0.2s;
+            width: 100%;
+            font-weight: 600;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+        }
+        
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .video-info {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            display: none;
+        }
+        
+        .video-info.show {
+            display: block;
+        }
+        
+        .video-thumbnail {
+            width: 100%;
+            border-radius: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .video-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .video-details {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        
+        audio {
+            width: 100%;
+            margin: 20px 0;
+        }
+        
+        .status {
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            display: none;
+        }
+        
+        .status.show {
+            display: block;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
+        .loading {
+            text-align: center;
+            color: #666;
+            margin: 20px 0;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error-box {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            color: #856404;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .example-urls {
+            background: #e7f3ff;
+            border-left: 4px solid #2196F3;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+        
+        .example-urls code {
+            background: #fff;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 12px;
+            color: #d63384;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎵 YouTube Audio Extractor</h1>
+        <p class="subtitle">Teste o extractor de áudio do YouTube usando yt-dlp</p>
+        
+        <div class="error-box">
+            ⚠️ <strong>Requisito:</strong> Este teste requer yt-dlp instalado no sistema
+        </div>
+        
+        <div class="input-group">
+            <label for="videoUrl">URL do YouTube:</label>
+            <input 
+                type="text" 
+                id="videoUrl" 
+                placeholder="Cole a URL do vídeo do YouTube aqui..."
+                value="https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            >
+        </div>
+        
+        <button onclick="searchVideo()" id="searchBtn">🔍 Buscar Vídeo</button>
+        
+        <div class="loading" id="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Processando...</p>
+        </div>
+        
+        <div class="status" id="status"></div>
+        
+        <div class="video-info" id="videoInfo">
+            <img id="videoThumbnail" class="video-thumbnail" alt="Thumbnail">
+            <div class="video-title" id="videoTitle"></div>
+            <div class="video-details" id="videoDetails"></div>
+            <audio id="audioPlayer" controls></audio>
+            <button onclick="downloadAudio()" id="downloadBtn">⬇️ Baixar Áudio</button>
+        </div>
+        
+        <div class="example-urls">
+            <strong>💡 Exemplos de URLs para testar:</strong><br>
+            <code>https://www.youtube.com/watch?v=dQw4w9WgXcQ</code><br>
+            <code>https://www.youtube.com/watch?v=9bZkp7q19f0</code><br>
+            <code>https://youtu.be/9bZkp7q19f0</code>
+        </div>
+    </div>
+
+    <script>
+        const videoUrl = document.getElementById('videoUrl');
+        const searchBtn = document.getElementById('searchBtn');
+        const loading = document.getElementById('loading');
+        const status = document.getElementById('status');
+        const videoInfo = document.getElementById('videoInfo');
+        const audioPlayer = document.getElementById('audioPlayer');
+        
+        function showStatus(message, type) {
+            status.textContent = message;
+            status.className = `status ${type} show`;
+            setTimeout(() => {
+                status.classList.remove('show');
+            }, 5000);
+        }
+        
+        async function searchVideo() {
+            const url = videoUrl.value.trim();
+            
+            if (!url) {
+                showStatus('⚠️ Por favor, insira uma URL!', 'error');
+                return;
+            }
+            
+            // Validar URL do YouTube
+            if (!url.includes('youtube.com') && !url.includes('youtu.be')) {
+                showStatus('❌ URL inválida! Use uma URL do YouTube.', 'error');
+                return;
+            }
+            
+            // Mostrar loading
+            loading.style.display = 'block';
+            searchBtn.disabled = true;
+            videoInfo.classList.remove('show');
+            
+            try {
+                // Buscar informações do vídeo
+                const response = await fetch(`/api/search?url=${encodeURIComponent(url)}`);
+                const data = await response.json();
+                
+                if (!data.success) {
+                    showStatus(`❌ Erro: ${data.error}`, 'error');
+                    return;
+                }
+                
+                // Mostrar informações do vídeo
+                document.getElementById('videoThumbnail').src = data.thumbnail;
+                document.getElementById('videoTitle').textContent = data.title;
+                document.getElementById('videoDetails').textContent = 
+                    `${data.uploader} • ${formatDuration(data.duration)} • ${formatViews(data.view_count)}`;
+                
+                videoInfo.classList.add('show');
+                showStatus('✅ Vídeo encontrado!', 'success');
+                
+                // Obter URL do áudio
+                await getAudioStream(url);
+                
+            } catch (error) {
+                showStatus(`❌ Erro ao buscar: ${error.message}`, 'error');
+            } finally {
+                loading.style.display = 'none';
+                searchBtn.disabled = false;
+            }
+        }
+        
+        async function getAudioStream(url) {
+            loading.style.display = 'block';
+            
+            try {
+                const response = await fetch(`/api/stream?url=${encodeURIComponent(url)}`);
+                const data = await response.json();
+                
+                if (!data.success) {
+                    showStatus(`❌ Erro ao obter áudio: ${data.error}`, 'error');
+                    return;
+                }
+                
+                // Configurar player de áudio
+                audioPlayer.src = data.url;
+                showStatus('🎵 Áudio pronto para reprodução!', 'success');
+                
+            } catch (error) {
+                showStatus(`❌ Erro ao obter áudio: ${error.message}`, 'error');
+            } finally {
+                loading.style.display = 'none';
+            }
+        }
+        
+        function downloadAudio() {
+            const url = audioPlayer.src;
+            if (url) {
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'audio.mp3';
+                a.click();
+                showStatus('⬇️ Download iniciado!', 'info');
+            }
+        }
+        
+        function formatDuration(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+        
+        function formatViews(views) {
+            if (views >= 1000000) {
+                return `${(views / 1000000).toFixed(1)}M views`;
+            } else if (views >= 1000) {
+                return `${(views / 1000).toFixed(1)}K views`;
+            }
+            return `${views} views`;
+        }
+        
+        // Enter para buscar
+        videoUrl.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                searchVideo();
+            }
+        });
+    </script>
+</body>
+</html>
+
