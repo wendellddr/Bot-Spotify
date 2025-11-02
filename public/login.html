@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Bot Spotify</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1DB954 0%, #1aa34a 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 1rem;
+        }
+        
+        .login-container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            padding: 3rem;
+            max-width: 400px;
+            width: 100%;
+            text-align: center;
+        }
+        
+        .logo {
+            margin-bottom: 2rem;
+        }
+        
+        .logo i {
+            font-size: 4rem;
+            color: #1DB954;
+            margin-bottom: 1rem;
+        }
+        
+        .logo h1 {
+            font-size: 2rem;
+            color: #333;
+            margin-bottom: 0.5rem;
+        }
+        
+        .logo p {
+            color: #666;
+            font-size: 1rem;
+        }
+        
+        .login-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.75rem;
+            background: #5865F2;
+            color: white;
+            padding: 1rem 2rem;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 1.1rem;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            border: none;
+            cursor: pointer;
+        }
+        
+        .login-btn:hover {
+            background: #4752C4;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(88, 101, 242, 0.4);
+        }
+        
+        .login-btn i {
+            font-size: 1.5rem;
+        }
+        
+        .error {
+            background: #fee;
+            border: 1px solid #fcc;
+            color: #c33;
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            font-size: 0.9rem;
+        }
+        
+        .info {
+            margin-top: 2rem;
+            padding-top: 2rem;
+            border-top: 1px solid #eee;
+            color: #666;
+            font-size: 0.9rem;
+        }
+        
+        .features {
+            margin-top: 1.5rem;
+            text-align: left;
+            color: #555;
+        }
+        
+        .features h3 {
+            font-size: 1rem;
+            margin-bottom: 0.75rem;
+            color: #333;
+        }
+        
+        .features ul {
+            list-style: none;
+            padding-left: 0;
+        }
+        
+        .features li {
+            padding: 0.25rem 0;
+            font-size: 0.9rem;
+        }
+        
+        .features li:before {
+            content: "✓ ";
+            color: #1DB954;
+            font-weight: bold;
+        }
+    </style>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo">
+            <i class="fas fa-headphones-alt"></i>
+            <h1>Bot Spotify</h1>
+            <p>Browser Control</p>
+        </div>
+        
+        <?php if (isset($_GET['error'])): ?>
+            <div class="error">
+                ❌ Authentication error. Please try again.
+            </div>
+        <?php endif; ?>
+        
+        <a href="/login" class="login-btn">
+            <i class="fab fa-discord"></i>
+            Login with Discord
+        </a>
+        
+        <div class="info">
+            <p><strong>Why login?</strong></p>
+            <p style="margin-top: 0.5rem;">To identify which servers you have the bot on, we need to authenticate via Discord OAuth2.</p>
+        </div>
+        
+        <div class="features">
+            <h3>Features:</h3>
+            <ul>
+                <li>Search and add songs easily</li>
+                <li>See queue in real time</li>
+                <li>Visual controls (Play/Pause/Skip)</li>
+                <li>Adjust volume</li>
+                <li>Modern and fast interface</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
+

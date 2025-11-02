@@ -1,0 +1,17 @@
+# Configuração do Railway/Nixpacks para o Bot Spotify
+
+[phases.setup]
+nixPkgs = ["nodejs_18", "ffmpeg", "python3"]
+
+[phases.install]
+cmd = "npm install"
+
+[phases.build]
+cmd = "pip3 install yt-dlp"
+
+[start]
+cmd = "npm start"
+
+[variables]
+NODE_VERSION = "18"
+

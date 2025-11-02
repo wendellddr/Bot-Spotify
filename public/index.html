@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Music Maestro</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Circular+Std:wght@400;500;700&family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <img src="assets/logo_music_maestro.png" alt="Music Maestro" class="logo-img">
+                    <h1>Music Maestro</h1>
+                </div>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-item active">
+                    <i class="fas fa-home"></i>
+                    <span>Home</span>
+                </a>
+                <a href="#" class="nav-item">
+                    <i class="fas fa-search"></i>
+                    <span>Search</span>
+                </a>
+            </nav>
+            
+            <div class="user-info">
+                <button id="logoutBtn" class="user-btn">
+                    <i class="fas fa-sign-out-alt"></i>
+                    <span>Log out</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Top Bar -->
+            <div class="topbar">
+                <div class="search-bar">
+                    <i class="fas fa-search search-icon"></i>
+                    <input type="text" id="searchInput" placeholder="What do you want to play?">
+                </div>
+                
+                <div class="topbar-controls">
+                    <select id="serverSelect" class="server-select">
+                        <option value="">Select server...</option>
+                    </select>
+                    <div id="voiceChannelSelector" class="voice-channel-wrapper" style="display: none;">
+                        <select id="voiceChannelSelect" class="server-select">
+                            <option value="">Select channel...</option>
+                        </select>
+                    </div>
+                    <button id="searchBtn" class="search-btn-topbar">
+                        <i class="fas fa-search"></i>
+                        <span>Search</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Content Area -->
+            <div class="content-area">
+                <!-- Now Playing (when music is playing) -->
+                <div class="now-playing-container" style="display: none;">
+                    <div class="now-playing-banner">
+                        <div class="now-playing-thumb" id="trackThumbnail">
+                            <i class="fas fa-music"></i>
+                        </div>
+                        <div class="now-playing-info">
+                            <div class="now-playing-subtitle">Now playing from your queue</div>
+                            <div class="now-playing-title" id="trackTitle">No music playing</div>
+                            <div class="now-playing-artist" id="trackArtist">Add a song to get started</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Search Results -->
+                <div id="searchResultsContainer" class="search-results-container" style="display: none;">
+                    <h2 class="section-title">Songs</h2>
+                    <div id="searchResults" class="results-grid"></div>
+                </div>
+
+                <!-- Main Display (when no search) -->
+                <div id="mainDisplay" class="main-display">
+                    <div class="welcome-section">
+                        <h1 class="welcome-title">Welcome to Music Maestro</h1>
+                        <p class="welcome-subtitle">Search for music and control your Discord bot</p>
+                    </div>
+                </div>
+
+                <!-- Queue -->
+                <div class="queue-container">
+                    <div class="queue-header-spotify">
+                        <div class="queue-title-row">
+                            <i class="fas fa-list"></i>
+                            <h2>Your Queue</h2>
+                            <span id="queueCount" class="queue-number">0</span>
+                        </div>
+                        <div class="player-controls">
+                            <button id="previousBtn" class="control-btn-small" disabled>
+                                <i class="fas fa-step-backward"></i>
+                            </button>
+                            <button id="playPauseBtn" class="control-btn-play" disabled>
+                                <i class="fas fa-play"></i>
+                            </button>
+                            <button id="skipBtn" class="control-btn-small" disabled>
+                                <i class="fas fa-step-forward"></i>
+                            </button>
+                            <button id="stopBtn" class="control-btn-small" disabled>
+                                <i class="fas fa-stop"></i>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="progress-container-spotify">
+                        <div class="progress-bar-spotify">
+                            <div class="progress-fill-spotify" id="progressFill"></div>
+                        </div>
+                        <div class="progress-time-spotify">
+                            <span id="currentTime" class="time-label">0:00</span>
+                            <span id="totalTime" class="time-label">0:00</span>
+                        </div>
+                    </div>
+
+                    <div id="queueList" class="queue-list-spotify">
+                        <div class="empty-queue-spotify">
+                            <i class="fas fa-music"></i>
+                            <p>Your queue is empty</p>
+                            <span>Search for songs to add to your queue</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="loader">
+            <div class="loader-spinner"></div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+Doações (/donate)
+Sistema premium/assinaturas
+Features de monetização
+Integração com serviços de pagamento
+O bot está funcional e otimizado. Se precisar de mais alguma coisa ou quiser adicionar funcionalidades, é só chamar.

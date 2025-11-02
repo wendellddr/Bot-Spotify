@@ -6,6 +6,9 @@ Um bot completo e moderno que integra busca do Spotify com reprodução de músi
 ![Node](https://img.shields.io/badge/Node.js-16.9%2B-green)
 ![Discord.js](https://img.shields.io/badge/Discord.js-14.x-blue)
 
+> 🚀 **Quer colocar seu bot online 24/7?** Veja o **[Guia de Início Rápido](docs/QUICK-START.md)**!  
+> 🌐 **Interface Web:** [Guia Rápido](docs/WEB-SETUP-GUIDE.md) | [Instalação Completa](docs/INSTALACAO-INTERFACE-WEB.md) | [Documentação](docs/INTERFACE-WEB.md)
+
 ## ✨ Funcionalidades Principais
 
 - 🎵 **Busca Inteligente**: Busque músicas por nome, artista ou URL
@@ -15,6 +18,7 @@ Um bot completo e moderno que integra busca do Spotify com reprodução de músi
 - 🔄 **Repetição**: Repita música atual ou fila inteira
 - ⚡ **Performance Otimizada**: Cache inteligente e busca rápida
 - 🎨 **Interface Bonita**: Embeds coloridos com informações detalhadas
+- 🌐 **Interface Web**: Controle o bot pelo navegador!
 
 ## 📋 Pré-requisitos
 
@@ -106,6 +110,31 @@ Antes de começar, você precisa de:
 5. **Pronto!** 🎉 
    
    O bot está online! Aguarde alguns segundos para os comandos serem registrados no Discord.
+
+## 📁 Estrutura do Projeto
+
+O projeto está organizado da seguinte forma:
+
+```
+Bot-Spotify/
+├── src/                    # Código fonte
+│   ├── bot/               # Bot do Discord
+│   │   └── index.js      # Arquivo principal do bot
+│   ├── server/           # Servidor web
+│   │   └── web-server.js # Servidor Express
+│   └── utils/            # Utilitários
+│       └── youtube-extractor.js
+├── public/               # Interface web
+│   ├── css/              # Estilos
+│   ├── js/               # JavaScript do cliente
+│   ├── index.html        # Interface principal
+│   └── login.html        # Página de login
+├── docs/                 # Documentação
+├── scripts/              # Scripts utilitários
+└── assets/               # Arquivos estáticos
+```
+
+> 📚 Para mais detalhes, veja [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)
 
 ## 🎮 Comandos Disponíveis
 
@@ -288,6 +317,18 @@ Este projeto está licenciado sob a MIT License.
 - [Androz2091](https://github.com/Androz2091) pelo incrível discord-player
 - Discord.js Community pela excelente documentação
 - Spotify pela API pública e gratuita
+
+---
+
+## 🚀 Deploy (Colocar Online)
+
+Quer que seu bot fique online 24/7? Siga o **[Guia Completo de Deploy](DEPLOY.md)**!
+
+Temos tutoriais para:
+- 🚂 **Railway** (Recomendado - $5/mês grátis)
+- 🌐 **Render** (Gratuito)
+- 🟢 **Replit** (Gratuito)
+- 🖥️ **VPS DigitalOcean** (Maior controle)
 
 ---
 
