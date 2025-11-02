@@ -1,3 +1,7 @@
 node_modules/
 .env
 package-lock.json
+*.log
+bot.log
+teste.mp3
+yt-dlp.exe
