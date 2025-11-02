@@ -1,209 +1,283 @@
-# 🎵 Spotify Discord Bot
+# 🎵 Bot de Música para Discord
 
-Bot de música para Discord que integra busca do Spotify com reprodução de múltiplas fontes (SoundCloud, Vimeo, Apple Music, etc.). Busque músicas no Spotify e toque-as diretamente nos canais de voz do seu servidor!
+Um bot completo e moderno que integra busca do Spotify com reprodução de música nos canais de voz do Discord. Busque músicas por nome ou artista e toque-as diretamente no seu servidor!
 
-> ⚠️ **Aviso**: Devido a mudanças na API do YouTube, o suporte ao YouTube não está disponível. O bot usa principalmente SoundCloud para reprodução de áudio.
+![Status](https://img.shields.io/badge/Status-Funcionando-brightgreen)
+![Node](https://img.shields.io/badge/Node.js-16.9%2B-green)
+![Discord.js](https://img.shields.io/badge/Discord.js-14.x-blue)
 
-## ✨ Funcionalidades
+## ✨ Funcionalidades Principais
 
-- 🎵 Buscar e tocar músicas usando nomes do Spotify
-- 🎤 Informações detalhadas de artistas e álbuns
-- 🔊 Reprodução em canais de voz
-- 📊 Embeds visuais com informações das músicas
-- 🔗 Links diretos para Spotify
-- ⏱️ Informação de duração das músicas
+- 🎵 **Busca Inteligente**: Busque músicas por nome, artista ou URL
+- 📋 **Menu de Seleção**: Escolha entre múltiplas opções quando encontrar várias músicas
+- 🎧 **Suporte Multiplataforma**: YouTube, SoundCloud, Spotify e mais
+- 📊 **Fila Completa**: Gerencie sua playlist com comandos avançados
+- 🔄 **Repetição**: Repita música atual ou fila inteira
+- ⚡ **Performance Otimizada**: Cache inteligente e busca rápida
+- 🎨 **Interface Bonita**: Embeds coloridos com informações detalhadas
 
-## 📋 Requisitos
+## 📋 Pré-requisitos
 
-- Node.js 16.9.0 ou superior
-- Conta Discord (para criar o bot)
-- Conta Spotify com acesso à API de desenvolvedor
+Antes de começar, você precisa de:
 
-## 🚀 Instalação
+- ✅ **Node.js** 16.9.0 ou superior ([Download](https://nodejs.org/))
+- ✅ Conta no **Discord** (para criar o bot)
+- ✅ Conta no **Spotify** (qualquer conta, sem Premium necessário)
 
-### 1. Criar um Bot no Discord
+## 🚀 Instalação Rápida
+
+### Passo 1: Criar o Bot no Discord
 
 1. Acesse o [Discord Developer Portal](https://discord.com/developers/applications)
-2. Clique em "New Application" e dê um nome
-3. Vá para "Bot" no menu lateral
-4. Clique em "Add Bot"
-5. Copie o **Token** (você precisará disso)
-6. Em "Privileged Gateway Intents", ative:
-   - PRESENCE INTENT
-   - SERVER MEMBERS INTENT
-   - MESSAGE CONTENT INTENT
-7. Vá para "OAuth2" > "URL Generator"
-8. Selecione:
+2. Clique em **"New Application"** e dê um nome ao seu bot
+3. Vá em **"Bot"** no menu lateral e clique em **"Add Bot"**
+4. Copie o **Token** (você precisará depois)
+5. Em **"Privileged Gateway Intents"**, ative:
+   - ✅ `MESSAGE CONTENT INTENT`
+   - ✅ `SERVER MEMBERS INTENT` (opcional, mas recomendado)
+6. Vá em **"OAuth2"** > **"URL Generator"**
+7. Selecione:
    - **Scopes**: `bot` e `applications.commands`
-   - **Bot Permissions**: IMPORTANTE - Selecione as seguintes:
-     - ✅ Connect (Conectar-se aos canais de voz)
-     - ✅ Speak (Falar nos canais de voz)
-     - ✅ Send Messages (Enviar mensagens)
-     - ✅ Use Slash Commands (Usar comandos slash)
-     - ✅ Embed Links (Enviar links com embed)
-     - ✅ Use Voice Activity (Usar atividade de voz)
-     - ✅ View Channels (Ver canais)
-9. Copie o link gerado e adicione o bot ao seu servidor
+   - **Bot Permissions**: 
+     - ✅ Connect (Conectar aos canais de voz)
+     - ✅ Speak (Falar nos canais)
+     - ✅ Use Voice Activity
+     - ✅ Send Messages
+     - ✅ Embed Links
+8. Copie o link gerado e adicione o bot ao seu servidor
 
-### 2. Criar uma App no Spotify
+### Passo 2: Criar App no Spotify
 
 1. Acesse o [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-2. Faça login com sua conta Spotify (qualquer conta funciona)
-3. Clique em "Create app"
+2. Faça login com sua conta Spotify (qualquer conta funciona!)
+3. Clique em **"Create app"**
 4. Preencha:
-   - App name: Nome do seu bot
-   - App description: Descrição do bot
-   - Website: Site do seu bot (opcional)
-   - Redirect URI: `http://localhost:8888/callback`
-5. Marque as caixas de confirmação de termos
-6. Clique em "Save"
-7. Na página do app, copie o **Client ID** e **Client Secret**
+   - **App name**: Nome do seu bot
+   - **App description**: Descrição do bot
+   - **Website**: (opcional)
+   - **Redirect URI**: `http://localhost:8888/callback`
+5. Marque os termos e clique em **"Save"**
+6. Copie o **Client ID** e **Client Secret**
 
-### 3. Configurar o Projeto
+### Passo 3: Configurar o Bot
 
-1. Clone ou baixe este repositório
-2. Instale as dependências:
+1. **Clone ou baixe este repositório**
+   ```bash
+   git clone <seu-repositorio>
+   cd Bot-Spotify
+   ```
 
-```bash
-npm install
+2. **Instale as dependências**
+   ```bash
+   npm install
+   ```
+
+3. **Configure as variáveis de ambiente**
+   
+   Copie o arquivo de exemplo:
+   ```bash
+   # Windows (PowerShell)
+   Copy-Item env.example .env
+   
+   # Linux/Mac
+   cp env.example .env
+   ```
+   
+   Abra o arquivo `.env` e preencha com seus dados:
+   ```env
+   DISCORD_TOKEN=seu_token_do_discord_aqui
+   CLIENT_ID=seu_client_id_do_discord_aqui
+   SPOTIFY_CLIENT_ID=seu_spotify_client_id_aqui
+   SPOTIFY_CLIENT_SECRET=seu_spotify_client_secret_aqui
+   ```
+
+   > ⚠️ **Importante**: Nunca compartilhe seu arquivo `.env`! Ele contém informações sensíveis.
+
+4. **Inicie o bot**
+   ```bash
+   npm start
+   ```
+   
+   Ou em modo desenvolvimento (com auto-reload):
+   ```bash
+   npm run dev
+   ```
+
+5. **Pronto!** 🎉 
+   
+   O bot está online! Aguarde alguns segundos para os comandos serem registrados no Discord.
+
+## 🎮 Comandos Disponíveis
+
+### Comandos Básicos
+
+| Comando | Descrição | Exemplo |
+|---------|-----------|---------|
+| `/play` | Toca uma música ou adiciona à fila | `/play busca: Bohemian Rhapsody` |
+| `/skip` | Pula a música atual | `/skip` |
+| `/pause` | Pausa a reprodução | `/pause` |
+| `/resume` | Retoma a reprodução pausada | `/resume` |
+| `/stop` | Para a música e limpa a fila | `/stop` |
+
+### Comandos de Fila
+
+| Comando | Descrição | Exemplo |
+|---------|-----------|---------|
+| `/queue` | Mostra a fila de músicas | `/queue pagina: 1` |
+| `/clear` | Limpa toda a fila | `/clear` |
+| `/shuffle` | Embaralha a fila | `/shuffle` |
+| `/remove` | Remove uma música específica | `/remove posicao: 3` |
+| `/jump` | Pula para uma música específica | `/jump posicao: 5` |
+| `/remove-duplicates` | Remove músicas duplicadas | `/remove-duplicates` |
+
+### Comandos Avançados
+
+| Comando | Descrição | Exemplo |
+|---------|-----------|---------|
+| `/nowplaying` | Mostra a música atual | `/nowplaying` |
+| `/volume` | Ajusta o volume (0-100) | `/volume valor: 50` |
+| `/loop` | Define modo de repetição | `/loop modo: Música atual` |
+| `/seek` | Avança na música atual | `/seek tempo: 1:30` |
+
+### Comandos Úteis
+
+| Comando | Descrição |
+|---------|-----------|
+| `/ping` | Verifica se o bot está online |
+
+## 📖 Como Usar
+
+### Buscar e Tocar Música
+
+1. Entre em um **canal de voz** no Discord
+2. Digite `/play busca: nome da música` ou `/play busca: nome do artista`
+3. Se encontrar várias músicas, escolha uma no menu que aparece
+4. A música começará a tocar automaticamente!
+
+### Exemplos de Uso
+
+```
+/play busca: Queen Bohemian Rhapsody
+/play busca: https://youtube.com/watch?v=...
+/play busca: The Beatles
 ```
 
-3. Copie o arquivo `env.example` para `.env`:
+### Menu de Seleção
 
-```bash
-# Windows (PowerShell)
-Copy-Item env.example .env
-
-# Linux/Mac
-cp env.example .env
-```
-
-4. Edite o arquivo `.env` e substitua os valores pelos seus tokens:
-
-```env
-DISCORD_TOKEN=seu_token_do_discord_aqui
-CLIENT_ID=seu_client_id_do_discord_aqui
-SPOTIFY_CLIENT_ID=seu_spotify_client_id_aqui
-SPOTIFY_CLIENT_SECRET=seu_spotify_client_secret_aqui
-```
-
-> ⚠️ **Importante:** Mantenha seu arquivo `.env` seguro e nunca o commite no Git!
-
-### 4. Executar o Bot
-
-```bash
-npm start
-```
-
-Ou em modo de desenvolvimento (com auto-reload):
-
-```bash
-npm run dev
-```
-
-## 🎮 Comandos
-
-### `/play` 🎵
-Busca uma música no Spotify e toca no canal de voz atual
-
-**Uso:** `/play música: nome da música`
-
-**Exemplo:** `/play música: Bohemian Rhapsody Queen`
-
-**Requisitos:** Você deve estar em um canal de voz para usar este comando
-
----
-
-### `/stop` ⏹️
-Para a reprodução de música atual e limpa a fila
-
-**Uso:** `/stop`
-
----
-
-### `/ping` 🏓
-Verifica se o bot está online e respondendo
-
-**Uso:** `/ping`
-
----
-
-### `/test` 🧪
-Testa reprodução com URL direta do YouTube (útil para debugging)
-
-**Uso:** `/test url: https://youtube.com/watch?v=...`
-
-**Exemplo:** `/test url: https://www.youtube.com/watch?v=dQw4w9WgXcQ`
-
-**Requisitos:** Você deve estar em um canal de voz para usar este comando
+Quando você busca algo genérico (como apenas o nome de um artista), o bot mostra um menu com até 10 opções. Basta clicar na música desejada!
 
 ## 🔧 Como Funciona
 
-Este bot combina duas APIs poderosas:
+O bot usa duas tecnologias principais:
 
-1. **Spotify API**: Usada para buscar informações detalhadas de músicas, artistas e álbuns
-2. **discord-player**: Reproduz as músicas no Discord usando múltiplas fontes de áudio
+1. **Spotify API**: Busca informações detalhadas de músicas, artistas e álbums
+2. **Discord Player**: Reproduz as músicas usando múltiplas fontes de áudio
 
 ### Plataformas Suportadas
 
-O bot suporta reprodução de várias fontes:
-- 🎧 **SoundCloud** - Faixas e playlists ⭐ PRINCIPAL
+- 🎬 **YouTube** - Vídeos e playlists
+- 🎧 **SoundCloud** - Faixas e playlists
 - 📹 **Vimeo** - Vídeos de áudio
 - 🍎 **Apple Music** - Músicas e playlists
-- 🎤 **Reverbnation** - Artistas independentes
 - 📎 **Arquivos MP3** - Uploads locais ou remotos
 
-⚠️ **Nota sobre YouTube**: Devido a mudanças recentes na API do YouTube que quebraram todos os extractors disponíveis, o YouTube não está disponível no momento. O bot tentará buscar músicas no SoundCloud e outras plataformas quando disponível.
+## 💡 Dicas e Truques
 
-Quando você usa o comando `/play`, o bot:
-1. Busca a música no Spotify para obter metadados completos
-2. Usa o discord-player para localizar o áudio em plataformas suportadas
-3. Reproduz a música no canal de voz com um embed informativo
+- ✅ **Busca Inteligente**: Você pode buscar por nome da música, artista ou até mesmo letras parciais
+- ✅ **URLs Diretas**: Cole URLs do YouTube diretamente no `/play`
+- ✅ **Menu de Seleção**: Se encontrar muitas opções, use o menu para escolher facilmente
+- ✅ **Repetição**: Use `/loop` para repetir sua música favorita
+- ✅ **Avançar Música**: Use `/seek` para pular partes da música atual
+
+## ❓ Perguntas Frequentes (FAQ)
+
+### O bot não está tocando música
+
+**Verifique:**
+- ✅ Você está em um canal de voz?
+- ✅ O bot tem permissão para entrar no canal?
+- ✅ As credenciais do Spotify estão corretas no `.env`?
+- ✅ O bot está online? (use `/ping` para verificar)
+
+**Solução:** Remova o bot do servidor e adicione-o novamente com as permissões corretas.
+
+### Comandos não aparecem no Discord
+
+**Aguarde:** Os comandos podem levar até 5 minutos para aparecerem após o bot iniciar.
+
+**Forçar atualização:**
+1. Feche completamente o Discord
+2. Abra novamente
+3. Os comandos devem aparecer
+
+### Erro ao instalar dependências
+
+**Certifique-se:**
+- ✅ Você tem Node.js 16.9.0 ou superior
+- ✅ Você está na pasta correta do projeto
+
+**Solução:** 
+```bash
+# Limpar e reinstalar
+rm -rf node_modules package-lock.json
+npm install
+```
+
+### O bot não encontra músicas
+
+**Possíveis causas:**
+- A busca pode ser muito genérica (tente ser mais específico)
+- A música pode não estar disponível nas plataformas suportadas
+- Tente usar uma URL direta do YouTube
+
+## 🐛 Resolução de Problemas
+
+### Bot desconecta do canal
+
+Isso é normal! O bot sai automaticamente quando:
+- Não há ninguém no canal de voz por mais de 1 minuto
+- Você usa `/stop` para parar a música
+
+Basta entrar no canal de voz novamente e usar `/play`.
+
+### Erro de permissões
+
+Certifique-se de que o bot tem estas permissões:
+- ✅ Conectar ao canal de voz
+- ✅ Falar no canal de voz
+- ✅ Enviar mensagens
+- ✅ Usar comandos slash
+
+### Erro ao conectar ao Spotify
+
+Verifique se:
+- ✅ O `SPOTIFY_CLIENT_ID` está correto
+- ✅ O `SPOTIFY_CLIENT_SECRET` está correto
+- ✅ Não há espaços extras no arquivo `.env`
 
 ## 📝 Notas Importantes
 
-- ⚠️ Este bot usa a **API de credenciais do cliente do Spotify**, que permite apenas consultas públicas (busca)
-- 🎵 A reprodução de áudio é feita via múltiplas plataformas usando a biblioteca discord-player
-- 🔒 Mantenha seus tokens seguros e **nunca os compartilhe publicamente**
-- 🚫 Não é necessário ter Spotify Premium para usar o bot
-
-## 🐛 Troubleshooting
-
-### Bot não toca música ⚠️ MAIS COMUM
-**Certifique-se de que o bot tem as permissões corretas:**
-- ✅ Connect (Conectar-se aos canais)
-- ✅ Speak (Falar nos canais)
-- ✅ Use Voice Activity (Usar atividade de voz)
-- Verifique se você está em um canal de voz
-- Verifique se as credenciais do Spotify estão corretas no `.env`
-- Se o bot já estava no servidor, você pode precisar removê-lo e adicioná-lo novamente com as novas permissões
-
-### Erro ao instalar dependências
-- Certifique-se de ter o Node.js 16.9.0 ou superior instalado
-- Tente deletar a pasta `node_modules` e `package-lock.json` e reinstalar com `npm install`
-
-### Bot não responde aos comandos
-- Verifique se o bot está online no Discord
-- Use `/ping` para testar se o bot está funcionando
-- Certifique-se de que os comandos slash foram registrados corretamente
+- 🔒 **Segurança**: Nunca compartilhe seu arquivo `.env` publicamente!
+- 🎵 **Spotify**: Você não precisa ter Spotify Premium para usar o bot
+- 📊 **Limites**: O bot usa cache para otimizar buscas repetidas
+- ⚡ **Performance**: O bot sai automaticamente de canais vazios para economizar recursos
 
 ## 🛠️ Tecnologias Utilizadas
 
 - [discord.js](https://discord.js.org/) - Framework para bots Discord
 - [discord-player](https://github.com/Androz2091/discord-player) - Sistema de reprodução de música
 - [Spotify Web API](https://developer.spotify.com/) - API do Spotify
-- [node-fetch](https://github.com/node-fetch/node-fetch) - Requisições HTTP
-- [dotenv](https://github.com/motdotla/dotenv) - Gerenciamento de variáveis de ambiente
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) - Extração de áudio do YouTube
 
 ## 🤝 Contribuindo
 
-Contribuições são bem-vindas! Sinta-se à vontade para:
+Contribuições são bem-vindas! Se você tem ideias para melhorar o bot:
 
-1. Fazer um fork do projeto
-2. Criar uma branch para sua feature (`git checkout -b feature/AmazingFeature`)
-3. Fazer commit das suas mudanças (`git commit -m 'Add some AmazingFeature'`)
-4. Push para a branch (`git push origin feature/AmazingFeature`)
-5. Abrir um Pull Request
+1. Faça um Fork do projeto
+2. Crie uma branch para sua feature (`git checkout -b feature/MinhaFeature`)
+3. Faça commit das mudanças (`git commit -m 'Adiciona MinhaFeature'`)
+4. Faça push para a branch (`git push origin feature/MinhaFeature`)
+5. Abra um Pull Request
 
 ## 📄 Licença
 
@@ -212,9 +286,13 @@ Este projeto está licenciado sob a MIT License.
 ## 🙏 Agradecimentos
 
 - [Androz2091](https://github.com/Androz2091) pelo incrível discord-player
-- Discord.js Community pelos recursos e documentação
-- Spotify pela API pública
+- Discord.js Community pela excelente documentação
+- Spotify pela API pública e gratuita
 
 ---
 
-⭐ Se este projeto te ajudou, deixe uma estrela!
+⭐ **Gostou do projeto?** Deixe uma estrela no repositório!
+
+💬 **Dúvidas?** Abra uma issue no GitHub!
+
+🎵 **Divirta-se usando o bot!**
