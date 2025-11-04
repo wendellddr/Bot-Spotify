@@ -224,7 +224,7 @@ server {
 ## 📝 Estrutura de Arquivos
 
 ```
-Bot-Spotify/
+MusicMaestro/
 ├── index.js              # Bot principal
 ├── web-server.js         # Servidor web
 ├── package.json          # Dependências

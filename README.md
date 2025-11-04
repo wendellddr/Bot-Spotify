@@ -1,4 +1,4 @@
-# 🎵 Bot de Música para Discord
+# 🎵 MusicMaestro - Bot de Música para Discord
 
 Um bot completo e moderno que integra busca do Spotify com reprodução de música nos canais de voz do Discord. Busque músicas por nome ou artista e toque-as diretamente no seu servidor!
 
@@ -68,7 +68,7 @@ Antes de começar, você precisa de:
 1. **Clone ou baixe este repositório**
    ```bash
    git clone <seu-repositorio>
-   cd Bot-Spotify
+   cd MusicMaestro
    ```
 
 2. **Instale as dependências**
@@ -116,7 +116,7 @@ Antes de começar, você precisa de:
 O projeto está organizado da seguinte forma:
 
 ```
-Bot-Spotify/
+MusicMaestro/
 ├── src/                    # Código fonte
 │   ├── bot/               # Bot do Discord
 │   │   └── index.js      # Arquivo principal do bot

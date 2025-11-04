@@ -5,7 +5,7 @@ const socketIo = require('socket.io');
 const session = require('express-session');
 const path = require('path');
 const { URLSearchParams } = require('url');
-const { ChannelType } = require('discord.js');
+const { ChannelType, EmbedBuilder } = require('discord.js');
 require('dotenv').config();
 
 // Importar instâncias do bot principal (vai ser injetado)
@@ -23,6 +23,143 @@ let spotifyTokenExpiry = 0;
 const searchCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const MAX_CACHE_SIZE = 200; // Increased cache size for better performance
+
+// YouTube search cache (fast lookup)
+const youtubeSearchCache = new Map();
+const YT_SEARCH_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+// Rate limiting
+const rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minuto
+const RATE_LIMIT_MAX_REQUESTS = {
+    autocomplete: 30, // 30 autocomplete por minuto
+    search: 10, // 10 buscas por minuto
+    play: 20 // 20 play por minuto
+};
+
+function checkRateLimit(req, endpoint) {
+    const ip = req.ip || req.connection.remoteAddress;
+    const key = `${ip}:${endpoint}`;
+    const now = Date.now();
+    
+    if (!rateLimitMap.has(key)) {
+        rateLimitMap.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
+        return true;
+    }
+    
+    const limit = rateLimitMap.get(key);
+    
+    // Reset se passou a janela
+    if (now > limit.resetAt) {
+        limit.count = 1;
+        limit.resetAt = now + RATE_LIMIT_WINDOW;
+        return true;
+    }
+    
+    // Verificar limite
+    const maxRequests = RATE_LIMIT_MAX_REQUESTS[endpoint] || 10;
+    if (limit.count >= maxRequests) {
+        return false;
+    }
+    
+    limit.count++;
+    return true;
+}
+
+// Limpar rate limits antigos periodicamente
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, limit] of rateLimitMap.entries()) {
+        if (now > limit.resetAt) {
+            rateLimitMap.delete(key);
+        }
+    }
+}, 5 * 60 * 1000); // A cada 5 minutos
+
+// Fast YouTube search using yt-dlp directly
+async function fastYouTubeSearch(query) {
+    const cacheKey = query.toLowerCase().trim();
+    const cached = youtubeSearchCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiry) {
+        return cached.url;
+    }
+
+    const { spawn } = require('child_process');
+    const path = require('path');
+    const fs = require('fs');
+    
+    // Encontrar yt-dlp
+    let ytdlpPath = path.join(__dirname, '../utils/yt-dlp.exe');
+    if (!fs.existsSync(ytdlpPath)) {
+        ytdlpPath = 'yt-dlp';
+    }
+
+    return new Promise((resolve) => {
+        const searchQuery = `ytsearch1:${query}`;
+        const ytdlp = spawn(ytdlpPath, [
+            '--dump-json',
+            '--no-playlist',
+            '--quiet',
+            '--no-warnings',
+            '--no-cache-dir',
+            '--skip-download',
+            '--socket-timeout', '3',
+            '--fragment-retries', '1',
+            '--retries', '1',
+            '--ignore-errors',
+            '--no-mtime',
+            '--extractor-args', 'youtube:player_client=android',
+            searchQuery
+        ], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true
+        });
+        
+        let output = '';
+        let hasResolved = false;
+        const timeout = setTimeout(() => {
+            if (!hasResolved) {
+                hasResolved = true;
+                ytdlp.kill();
+                resolve(null);
+            }
+        }, 4000); // 4 segundos timeout
+        
+        ytdlp.stdout.on('data', (data) => {
+            output += data.toString();
+        });
+        
+        ytdlp.on('close', (code) => {
+            if (hasResolved) return;
+            clearTimeout(timeout);
+            
+            if (code === 0 && output) {
+                try {
+                    const info = JSON.parse(output);
+                    if (info && info.webpage_url) {
+                        youtubeSearchCache.set(cacheKey, {
+                            url: info.webpage_url,
+                            expiry: Date.now() + YT_SEARCH_CACHE_TTL
+                        });
+                        resolve(info.webpage_url);
+                        return;
+                    }
+                } catch (e) {
+                    // Ignore parse errors
+                }
+            }
+            resolve(null);
+            hasResolved = true;
+        });
+        
+        ytdlp.on('error', () => {
+            if (hasResolved) return;
+            clearTimeout(timeout);
+            resolve(null);
+            hasResolved = true;
+        });
+    });
+}
 
 // Get Spotify access token
 async function getSpotifyToken() {
@@ -157,22 +294,43 @@ function initWebServer(botClient, botPlayer) {
     
     // Configurar sessão
     app.use(session({
-        secret: process.env.SESSION_SECRET || 'seu-secret-super-seguro-aqui',
+        secret: process.env.SESSION_SECRET || 'music-maestro-secret-key-change-in-production',
         resave: false,
         saveUninitialized: false,
-        cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 } // 24 horas
+        cookie: {
+            secure: process.env.NODE_ENV === 'production',
+            httpOnly: true,
+            maxAge: 24 * 60 * 60 * 1000, // 24 horas
+            sameSite: 'lax'
+        }
     }));
     
     // Middleware
     app.use(express.json());
     app.use(express.static(path.join(__dirname, '../../public')));
     
+    // Sanitização de inputs
+    function sanitizeInput(input) {
+        if (typeof input !== 'string') return '';
+        return input.trim().substring(0, 500); // Limitar tamanho
+    }
+    
     // Middleware para verificar autenticação
     function requireAuth(req, res, next) {
-        if (req.session.user) {
-            return next();
+        // Verificar se sessão expirou
+        if (!req.session || !req.session.user) {
+            return res.redirect('/login');
         }
-        res.redirect('/login');
+        
+        // Verificar timeout de sessão (24 horas)
+        if (req.session.lastActivity && Date.now() - req.session.lastActivity > 24 * 60 * 60 * 1000) {
+            req.session.destroy();
+            return res.redirect('/login');
+        }
+        
+        // Atualizar última atividade
+        req.session.lastActivity = Date.now();
+        return next();
     }
     
     // Rotas de autenticação
@@ -317,7 +475,7 @@ function initWebServer(botClient, botPlayer) {
                     duration: queue.currentTrack.duration,
                     thumbnail: queue.currentTrack.thumbnail
                 } : null,
-                queue: Array.from(queue.tracks.values()).map(track => ({
+                queue: queue.tracks.toArray().map(track => ({
                     title: track.title,
                     author: track.author,
                     url: track.url,
@@ -338,20 +496,96 @@ function initWebServer(botClient, botPlayer) {
         }
     });
     
+    // API: Autocomplete (sugestões rápidas)
+    app.post('/api/autocomplete/:guildId', requireAuth, async (req, res) => {
+        try {
+            // Rate limiting
+            if (!checkRateLimit(req, 'autocomplete')) {
+                return res.status(429).json({ 
+                    success: false, 
+                    error: 'Too many requests. Please wait a moment.' 
+                });
+            }
+            
+            const { query } = req.body;
+            
+            // Validação e sanitização
+            if (!query || typeof query !== 'string') {
+                return res.json({ success: true, suggestions: [] });
+            }
+            
+            const sanitizedQuery = sanitizeInput(query);
+            
+            if (sanitizedQuery.length < 2) {
+                return res.json({ success: true, suggestions: [] });
+            }
+            
+            const searchQuery = sanitizedQuery.substring(0, 50); // Limitar tamanho
+            
+            // Busca rápida no Spotify com limite menor
+            try {
+                const token = await getSpotifyToken();
+                if (!token) {
+                    return res.json({ success: true, suggestions: [] });
+                }
+                
+                const response = await fetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(searchQuery)}&type=track&limit=5`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                
+                if (!response.ok) {
+                    return res.json({ success: true, suggestions: [] });
+                }
+                
+                const data = await response.json();
+                const suggestions = (data.tracks?.items || []).map(track => ({
+                    title: track.name,
+                    artist: track.artists.map(a => a.name).join(', '),
+                    fullQuery: `${track.artists[0].name} - ${track.name}`
+                }));
+                
+                res.json({ success: true, suggestions });
+            } catch (error) {
+                console.error('❌ Autocomplete error:', error);
+                res.json({ success: true, suggestions: [] });
+            }
+        } catch (error) {
+            console.error('❌ Error in autocomplete:', error);
+            res.json({ success: true, suggestions: [] });
+        }
+    });
+    
     // API: Buscar música
     app.post('/api/search/:guildId', requireAuth, async (req, res) => {
         const startTime = Date.now();
         try {
+            // Rate limiting
+            if (!checkRateLimit(req, 'search')) {
+                return res.status(429).json({ 
+                    success: false, 
+                    error: 'Too many requests. Please wait a moment.' 
+                });
+            }
+            
             const { guildId } = req.params;
             const { query } = req.body;
             
-            if (!query || !query.trim()) {
+            // Validação e sanitização
+            if (!query || typeof query !== 'string' || !query.trim()) {
                 return res.status(400).json({ success: false, error: 'Empty query' });
+            }
+            
+            const sanitizedQuery = sanitizeInput(query);
+            
+            if (sanitizedQuery.length < 1) {
+                return res.status(400).json({ success: false, error: 'Query too short' });
             }
             
             // Fast Spotify search
             try {
-                const spotifyTracks = await fastSpotifySearch(query);
+                const spotifyTracks = await fastSpotifySearch(sanitizedQuery);
                 
                 if (spotifyTracks.length === 0) {
                     return res.status(404).json({ 
@@ -393,8 +627,25 @@ function initWebServer(botClient, botPlayer) {
     // API: Adicionar música à fila
     app.post('/api/play/:guildId', requireAuth, async (req, res) => {
         try {
+            // Rate limiting
+            if (!checkRateLimit(req, 'play')) {
+                return res.status(429).json({ 
+                    success: false, 
+                    error: 'Too many requests. Please wait a moment.' 
+                });
+            }
+            
             const { guildId } = req.params;
-            const { trackUrl, voiceChannelId, trackTitle, trackArtist } = req.body;
+            let { trackUrl, voiceChannelId, trackTitle, trackArtist } = req.body;
+            
+            // Validação e sanitização
+            if (!trackUrl || typeof trackUrl !== 'string') {
+                return res.status(400).json({ success: false, error: 'No track provided' });
+            }
+            
+            trackUrl = sanitizeInput(trackUrl);
+            trackTitle = trackTitle ? sanitizeInput(trackTitle) : '';
+            trackArtist = trackArtist ? sanitizeInput(trackArtist) : '';
             
             if (!trackUrl) {
                 return res.status(400).json({ success: false, error: 'No track provided' });
@@ -431,17 +682,34 @@ function initWebServer(botClient, botPlayer) {
                 });
             }
             
+            // Encontrar um canal de texto para enviar mensagens
+            let textChannel = null;
+            if (queue && queue.metadata && queue.metadata.channel) {
+                // Se já tem um canal de texto na fila, usar ele
+                textChannel = queue.metadata.channel;
+            } else {
+                // Buscar o primeiro canal de texto que o bot tem permissão
+                textChannel = guild.channels.cache.find(ch => 
+                    ch.type === ChannelType.GuildText && 
+                    ch.permissionsFor(client.user)?.has(['SendMessages', 'EmbedLinks'])
+                );
+            }
+            
             // Criar ou obter fila
             if (!queue) {
                 queue = player.nodes.create(guild, {
                     metadata: {
-                        channel: voiceChannel
+                        channel: textChannel || voiceChannel // Usar canal de texto se disponível
                     },
                     leaveOnEmpty: true,
                     leaveOnEnd: false,
                     leaveOnStop: true,
                     leaveOnEmptyCooldown: 15000
                 });
+            } else if (textChannel && (!queue.metadata || !queue.metadata.channel || queue.metadata.channel.type === ChannelType.GuildVoice)) {
+                // Atualizar metadata se não tiver canal de texto
+                queue.metadata = queue.metadata || {};
+                queue.metadata.channel = textChannel;
             }
             
             // Conectar ao canal se necessário
@@ -467,46 +735,171 @@ function initWebServer(botClient, botPlayer) {
                 }
             }
             
-            // Buscar no YouTube usando título e artista
-            const searchQuery = trackArtist ? `${trackArtist} - ${trackTitle}` : trackTitle;
-            const searchStartTime = Date.now();
-            console.log(`🎬 Searching YouTube for: "${searchQuery}"`);
-            
-            const searchResult = await player.search(searchQuery, {
-                requestedBy: null
-            });
-            
-            const searchDuration = Date.now() - searchStartTime;
-            console.log(`⏱️  YouTube search took ${searchDuration}ms`);
-            
-            if (!searchResult.hasTracks()) {
-                return res.status(404).json({ 
-                    success: false, 
-                    error: 'Track not found on YouTube' 
-                });
-            }
-            
-            const track = searchResult.tracks[0];
-            queue.addTrack(track);
-            
-            if (!queue.isPlaying()) {
-                await queue.node.play();
-            }
-            
-            console.log(`✅ Added "${track.title}" to queue`);
-            
+            // Responder imediatamente ao frontend (não bloquear)
             res.json({ 
                 success: true, 
-                message: 'Song added to queue!',
-                data: { 
-                    title: track.title,
-                    author: track.author,
-                    duration: track.duration
-                }
+                message: 'Processing song...',
+                processing: true
             });
             
-            // Emitir para WebSocket
-            io.to(guildId).emit('queueUpdate', { action: 'added', track: track.title });
+            // Processar busca e adicionar à fila em background
+            (async () => {
+                try {
+                    // Buscar no YouTube usando título e artista
+                    const searchQuery = trackArtist ? `${trackArtist} - ${trackTitle}` : trackTitle;
+                    const searchStartTime = Date.now();
+                    console.log(`🎬 Searching YouTube for: "${searchQuery}"`);
+                    
+                    // Notificar início da busca via WebSocket
+                    io.to(guildId).emit('queueUpdate', { 
+                        action: 'processing', 
+                        track: trackTitle,
+                        message: 'Searching for audio...'
+                    });
+                    
+                    // Tentar busca ultra-rápida via Piped primeiro
+                    let youtubeUrl;
+                    try {
+                        const { fastSearchUrl } = require('../utils/fast-search');
+                        youtubeUrl = await fastSearchUrl(searchQuery);
+                    } catch (_) {
+                        youtubeUrl = null;
+                    }
+                    // Fallback: fastYouTubeSearch existente
+                    if (!youtubeUrl) {
+                        youtubeUrl = await fastYouTubeSearch(searchQuery);
+                    }
+                    
+                    let searchResult;
+                    if (youtubeUrl) {
+                        // Se encontrou URL diretamente, usar ela
+                        searchResult = await player.search(youtubeUrl, {
+                            requestedBy: null
+                        });
+                        // Prefetch do stream em background (não aguardar)
+                        try {
+                            const { prefetchStreamUrl } = require('../utils/youtube-extractor');
+                            prefetchStreamUrl(youtubeUrl).catch(() => {});
+                        } catch (_) {}
+                    } else {
+                        // Fallback para busca normal do player
+                        searchResult = await player.search(searchQuery, {
+                            requestedBy: null
+                        });
+                    }
+                    
+                    const searchDuration = Date.now() - searchStartTime;
+                    console.log(`⏱️  YouTube search took ${searchDuration}ms`);
+                    
+                    if (!searchResult.hasTracks()) {
+                        // Notificar erro via WebSocket
+                        io.to(guildId).emit('queueUpdate', { 
+                            action: 'error', 
+                            track: trackTitle,
+                            error: 'Track not found on YouTube'
+                        });
+                        return;
+                    }
+                    
+                    const track = searchResult.tracks[0];
+                    const wasPlaying = queue.isPlaying();
+                    const queueSize = queue.size;
+                    
+                    // Logs de tempo para web interface
+                    const webPlayStartTime = Date.now();
+                    console.log(`\n⏱️  [TIMING] ===== INICIANDO REPRODUÇÃO VIA WEB =====`);
+                    console.log(`   ⏱️  [TIMING] Música: "${track.title}"`);
+                    console.log(`   ⏱️  [TIMING] Tempo inicial: ${new Date().toISOString()}`);
+                    
+                    const addStart = Date.now();
+                    queue.addTrack(track);
+                    const addTime = ((Date.now() - addStart) / 1000).toFixed(2);
+                    console.log(`   ⏱️  [TIMING] Track adicionada à fila: ${addTime}s`);
+                    
+                    if (!queue.isPlaying()) {
+                        const playCallStart = Date.now();
+                        console.log(`   ⏱️  [TIMING] Chamando queue.node.play()...`);
+                        await queue.node.play();
+                        const playCallTime = ((Date.now() - playCallStart) / 1000).toFixed(2);
+                        console.log(`   ⏱️  [TIMING] queue.node.play() retornou: ${playCallTime}s`);
+                    }
+                    
+                    const totalTime = ((Date.now() - webPlayStartTime) / 1000).toFixed(2);
+                    console.log(`   ⏱️  [TIMING] Tempo total até agora: ${totalTime}s`);
+                    console.log(`✅ Added "${track.title}" to queue`);
+                    
+                    // Enviar mensagem no Discord
+                    try {
+                        // Tentar obter o canal do metadata da fila (já configurado acima)
+                        const channel = queue.metadata && queue.metadata.channel && 
+                                       queue.metadata.channel.type === ChannelType.GuildText 
+                                       ? queue.metadata.channel : null;
+                        
+                        if (channel) {
+                            const embed = new EmbedBuilder()
+                                .setColor(0x1DB954)
+                                .setThumbnail(track.thumbnail || null);
+                            
+                            if (!wasPlaying && queue.isPlaying()) {
+                                embed.setTitle('🎵 Now Playing')
+                                    .setDescription(`**${track.title}**\n🎤 ${track.author || 'Unknown Artist'}`)
+                                    .setFooter({ text: '✅ Added from Web Interface' });
+                            } else {
+                                embed.setTitle('➕ Added to Queue')
+                                    .setDescription(`**${track.title}**\n🎤 ${track.author || 'Unknown Artist'}`)
+                                    .addFields({ 
+                                        name: '📊 Position', 
+                                        value: `#${queueSize + 1} in queue`, 
+                                        inline: true 
+                                    })
+                                    .setFooter({ text: '✅ Added from Web Interface' });
+                            }
+                            
+                            if (track.duration) {
+                                embed.addFields({ 
+                                    name: '⏱️ Duration', 
+                                    value: track.duration, 
+                                    inline: true 
+                                });
+                            }
+                            
+                            if (track.url) {
+                                embed.addFields({ 
+                                    name: '🔗 Link', 
+                                    value: `[Open](${track.url})`, 
+                                    inline: true 
+                                });
+                            }
+                            
+                            embed.setTimestamp();
+                            
+                            await channel.send({ embeds: [embed] });
+                        }
+                    } catch (error) {
+                        console.error('❌ Error sending Discord message:', error.message);
+                        // Não bloquear se falhar ao enviar mensagem
+                    }
+                    
+                    // Notificar sucesso via WebSocket
+                    io.to(guildId).emit('queueUpdate', { 
+                        action: 'added', 
+                        track: track.title,
+                        data: {
+                            title: track.title,
+                            author: track.author,
+                            duration: track.duration
+                        }
+                    });
+                } catch (error) {
+                    console.error('❌ Error processing track in background:', error);
+                    // Notificar erro via WebSocket
+                    io.to(guildId).emit('queueUpdate', { 
+                        action: 'error', 
+                        track: trackTitle,
+                        error: error.message || 'Error processing track'
+                    });
+                }
+            })();
         } catch (error) {
             console.error('❌ Error playing:', error);
             res.status(500).json({ success: false, error: error.message });
@@ -581,6 +974,69 @@ function initWebServer(botClient, botPlayer) {
         }
     });
     
+    // API: Embaralhar fila
+    app.post('/api/shuffle/:guildId', requireAuth, (req, res) => {
+        try {
+            const { guildId } = req.params;
+            const queue = player.nodes.get(guildId);
+            
+            if (!queue || queue.tracks.size < 2) {
+                return res.status(400).json({ success: false, error: 'Need at least 2 songs to shuffle' });
+            }
+            
+            queue.tracks.shuffle();
+            io.to(guildId).emit('queueUpdate', { action: 'shuffled' });
+            res.json({ success: true, message: 'Queue shuffled' });
+        } catch (error) {
+            console.error('❌ Error shuffling:', error);
+            res.status(500).json({ success: false, error: error.message });
+        }
+    });
+    
+    // API: Limpar fila
+    app.post('/api/clear/:guildId', requireAuth, (req, res) => {
+        try {
+            const { guildId } = req.params;
+            const queue = player.nodes.get(guildId);
+            
+            if (!queue || queue.tracks.size === 0) {
+                return res.status(400).json({ success: false, error: 'Queue is already empty' });
+            }
+            
+            const cleared = queue.tracks.size;
+            queue.clear();
+            io.to(guildId).emit('queueUpdate', { action: 'cleared', count: cleared });
+            res.json({ success: true, message: `Removed ${cleared} song(s)` });
+        } catch (error) {
+            console.error('❌ Error clearing:', error);
+            res.status(500).json({ success: false, error: error.message });
+        }
+    });
+    
+    // API: Ajustar volume
+    app.post('/api/volume/:guildId', requireAuth, (req, res) => {
+        try {
+            const { guildId } = req.params;
+            const { volume } = req.body;
+            const queue = player.nodes.get(guildId);
+            
+            if (!queue || !queue.isPlaying()) {
+                return res.status(400).json({ success: false, error: 'No music is playing' });
+            }
+            
+            if (volume !== undefined) {
+                const vol = Math.min(Math.max(parseInt(volume), 0), 100);
+                queue.node.setVolume(vol);
+                res.json({ success: true, message: `Volume set to ${vol}%` });
+            } else {
+                res.json({ success: true, currentVolume: queue.node.volume });
+            }
+        } catch (error) {
+            console.error('❌ Error setting volume:', error);
+            res.status(500).json({ success: false, error: error.message });
+        }
+    });
+    
     // WebSocket para atualização em tempo real
     io.on('connection', (socket) => {
         console.log('🌐 WebSocket client connected');
@@ -602,7 +1058,8 @@ function initWebServer(botClient, botPlayer) {
         console.log(`   Routes registered:`, 
             ['/', '/login', '/api/servers', '/api/search/:guildId', '/api/play/:guildId', 
              '/api/status/:guildId', '/api/voice-channels/:guildId', '/api/toggle/:guildId', 
-             '/api/stop/:guildId', '/api/skip/:guildId'].join(', ')
+             '/api/stop/:guildId', '/api/skip/:guildId', '/api/shuffle/:guildId', 
+             '/api/clear/:guildId', '/api/volume/:guildId'].join(', ')
         );
     });
     

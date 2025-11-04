@@ -28,7 +28,7 @@
 
 1. **Crie um repositório no GitHub** (se ainda não tiver):
    - Acesse: https://github.com/new
-   - Nome: `Bot-Spotify` (ou o que preferir)
+   - Nome: `MusicMaestro` (ou o que preferir)
    - Selecione "Public" ou "Private"
    - Clique em "Create repository"
 
@@ -47,7 +47,7 @@
    git commit -m "Primeiro commit"
    
    # Adicionar remote do GitHub (substitua pela sua URL)
-   git remote add origin https://github.com/SEU_USUARIO/Bot-Spotify.git
+   git remote add origin https://github.com/SEU_USUARIO/MusicMaestro.git
    
    # Enviar para o GitHub
    git branch -M main
@@ -72,7 +72,7 @@
 2. **Criar projeto**
    - Clique em **"New Project"**
    - Escolha **"Deploy from GitHub repo"**
-   - Selecione seu repositório `Bot-Spotify`
+   - Selecione seu repositório `MusicMaestro`
 
 3. **Aguardar detecção**
    - Railway vai detectar automaticamente que é Node.js

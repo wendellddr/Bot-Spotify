@@ -1,11 +1,11 @@
 # Project Structure
 
-This document explains the organization of the Bot Spotify project.
+This document explains the organization of the MusicMaestro project.
 
 ## 📁 Directory Structure
 
 ```
-Bot-Spotify/
+MusicMaestro/
 ├── src/                          # Source code
 │   ├── bot/                      # Discord bot core
 │   │   └── index.js             # Main bot entry point

@@ -1,4 +1,4 @@
-# 🚀 Guia de Deploy - Bot Spotify Discord
+# 🚀 Guia de Deploy - MusicMaestro Discord
 
 Este guia te ajudará a colocar seu bot online usando diferentes plataformas.
 
@@ -114,7 +114,7 @@ O Railway é Linux, então você precisa instalar yt-dlp via script. Adicione um
    - Clique em "New +" > "Web Service"
    - Conecte ao repositório GitHub
    - Configurações:
-     - **Name**: Spotify Bot
+     - **Name**: MusicMaestro
      - **Region**: Escolha o mais próximo
      - **Branch**: main
      - **Root Directory**: . (ponto)
@@ -210,7 +210,7 @@ Para manter o bot online 24/7 no free tier:
 5. **Clonar e configurar o bot**
    ```bash
    git clone seu_repositorio_url
-   cd Bot-Spotify
+   cd MusicMaestro
    npm install
    ```
 
@@ -223,7 +223,7 @@ Para manter o bot online 24/7 no free tier:
 7. **Rodar com PM2 (mantém online)**
    ```bash
    sudo npm install -g pm2
-   pm2 start index.js --name spotify-bot
+   pm2 start index.js --name music-maestro
    pm2 save
    pm2 startup
    ```
@@ -231,7 +231,7 @@ Para manter o bot online 24/7 no free tier:
 8. **Pronto!**
    - Seu bot está online 24/7
    - Use `pm2 logs` para ver logs
-   - Use `pm2 restart spotify-bot` para reiniciar
+   - Use `pm2 restart music-maestro` para reiniciar
 
 ---
 

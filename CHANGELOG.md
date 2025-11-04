@@ -8,7 +8,7 @@
 
 **Antes:**
 ```
-Bot-Spotify/
+MusicMaestro/
 ├── index.js
 ├── web-server.js
 ├── youtube-extractor.js
@@ -24,7 +24,7 @@ Bot-Spotify/
 
 **Depois:**
 ```
-Bot-Spotify/
+MusicMaestro/
 ├── src/
 │   ├── bot/
 │   │   └── index.js

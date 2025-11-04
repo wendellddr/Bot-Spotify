@@ -1,7 +1,7 @@
 {
-  "name": "spotify-discord-bot",
+  "name": "music-maestro",
   "version": "1.0.0",
-  "description": "Discord bot integrado com Spotify",
+  "description": "MusicMaestro - Discord bot integrado com Spotify",
   "main": "src/bot/index.js",
   "scripts": {
     "start": "node src/bot/index.js",

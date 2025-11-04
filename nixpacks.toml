@@ -1,4 +1,4 @@
-# Configuração do Railway/Nixpacks para o Bot Spotify
+# Configuração do Railway/Nixpacks para o MusicMaestro
 
 [phases.setup]
 nixPkgs = ["nodejs_18", "ffmpeg", "python3"]

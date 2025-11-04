@@ -38,11 +38,14 @@ const client = new Client({
     ]
 });
 
-// Inicializar Discord Player com configurações otimizadas para resource saving
+// Inicializar Discord Player com configurações otimizadas para streaming ultra-rápido
 const player = new Player(client, {
     blockExtractors: [],
     blockStreamFrom: [],
-    skipFFmpeg: false,
+    skipFFmpeg: false, // Manter FFmpeg para conversão de formatos quando necessário
+    // Configurações de streaming ultra-otimizadas
+    bufferingTimeout: 500, // Agressivo: iniciar com 0.5s de buffer
+    connectionTimeout: 20000, // Timeout de conexão reduzido (20 segundos)
     // Configurações globais para resource saving
     leaveOnEnd: false, // Vamos controlar manualmente com delay
     leaveOnStop: true, // Sair quando parar manualmente
@@ -85,6 +88,9 @@ const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
 let accessToken = null;
 let tokenExpiry = 0;
 let tokenRefreshPromise = null;
+
+// Socket.IO instance from web server
+let socketIO = null;
 
 // Cache de querys do Spotify (5 minutos TTL)
 const searchCache = new Map();
@@ -464,7 +470,7 @@ async function registerGuildCommands(guildId) {
 }
 
 // Evento quando o bot está pronto
-client.once('clientReady', async () => {
+client.once('ready', async () => {
     console.log(`Bot connected as ${client.user.tag}!`);
     
     // Obter token inicial do Spotify
@@ -476,7 +482,11 @@ client.once('clientReady', async () => {
     // Inicializar servidor web (interface HTML)
     try {
         const { initWebServer } = require('../server/web-server');
-        initWebServer(client, player);
+        const webServer = initWebServer(client, player);
+        if (webServer && webServer.io) {
+            socketIO = webServer.io;
+            console.log('✅ Socket.IO connected');
+        }
     } catch (error) {
         console.log('⚠️  Erro ao inicializar servidor web:', error.message);
         console.log('   Instale as dependências: npm install express socket.io discord-oauth2 express-session');
@@ -528,11 +538,32 @@ async function getOrCreateQueue(guild, channel, voiceChannel) {
     return queue;
 }
 
-// Função auxiliar para adicionar e reproduzir track
-async function playTrack(queue, track) {
+// Função auxiliar para adicionar e reproduzir track com logs de tempo
+async function playTrack(queue, track, startTime = null) {
+    const playStartTime = startTime || Date.now();
+    const trackTitle = track.title || 'Unknown';
+    
+    // Armazenar tempo de início para calcular quando começar a tocar
+    trackStartTimes.set(`${queue.guild.id}-${track.url}`, playStartTime);
+    
+    console.log(`\n⏱️  [TIMING] Iniciando reprodução: "${trackTitle}"`);
+    const addStart = Date.now();
+    
     queue.addTrack(track);
+    const addTime = ((Date.now() - addStart) / 1000).toFixed(2);
+    console.log(`   ⏱️  [TIMING] Track adicionada à fila: ${addTime}s`);
+    
     if (!queue.isPlaying()) {
+        const playCallStart = Date.now();
+        console.log(`   ⏱️  [TIMING] Chamando queue.node.play()...`);
+        
         await queue.node.play();
+        
+        const playCallTime = ((Date.now() - playCallStart) / 1000).toFixed(2);
+        const totalTime = ((Date.now() - playStartTime) / 1000).toFixed(2);
+        console.log(`   ⏱️  [TIMING] queue.node.play() retornou: ${playCallTime}s`);
+        console.log(`   ⏱️  [TIMING] Tempo total até agora: ${totalTime}s`);
+        console.log(`   ⏱️  [TIMING] Aguardando início do áudio (playerStart event)...`);
     }
 }
 
@@ -548,6 +579,51 @@ function formatDuration(ms) {
         return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     }
     return `${minutes}:${secs.toString().padStart(2, '0')}`;
+}
+
+// Converter duração de string "MM:SS" ou "HH:MM:SS" para milissegundos
+function parseDurationToMs(duration) {
+    if (!duration) return 0;
+    
+    // Se já for um número, assumir que é em segundos
+    if (typeof duration === 'number') {
+        return duration * 1000;
+    }
+    
+    // Se for string, parsear formato "MM:SS" ou "HH:MM:SS"
+    if (typeof duration === 'string') {
+        const parts = duration.split(':').map(Number);
+        if (parts.length === 2) {
+            // MM:SS
+            const [minutes, seconds] = parts;
+            return (minutes * 60 + seconds) * 1000;
+        } else if (parts.length === 3) {
+            // HH:MM:SS
+            const [hours, minutes, seconds] = parts;
+            return (hours * 3600 + minutes * 60 + seconds) * 1000;
+        }
+    }
+    
+    return 0;
+}
+
+// Calcular duração total da fila
+function calculateQueueDuration(queue) {
+    if (!queue || !queue.tracks) return 0;
+    
+    let totalMs = 0;
+    
+    // Adicionar duração de todas as músicas na fila
+    for (const track of queue.tracks.toArray()) {
+        totalMs += parseDurationToMs(track.duration);
+    }
+    
+    // Adicionar duração da música atual se estiver tocando (não está na fila ainda)
+    if (queue.currentTrack) {
+        totalMs += parseDurationToMs(queue.currentTrack.duration);
+    }
+    
+    return totalMs;
 }
 
 // Eventos do Discord Player
@@ -567,8 +643,11 @@ player.events.on('playerError', (queue, error) => {
     console.error('❌ Erro no player:', error.message);
 });
 
+// Armazenar tempos de início para calcular tempo total até tocar
+const trackStartTimes = new Map();
+
 // Evento quando uma track começa a tocar
-player.events.on('playerStart', (queue, track) => {
+player.events.on('playerStart', async (queue, track) => {
     // Cancelar timer de saída se existir (alguém adicionou música)
     if (endTimers.has(queue.guild.id)) {
         clearTimeout(endTimers.get(queue.guild.id));
@@ -576,9 +655,59 @@ player.events.on('playerStart', (queue, track) => {
         console.log('✅ Timer cancelled - music playing again!');
     }
     
-    // Log apenas em mode debug se necessário
-    if (process.env.DEBUG === 'true') {
-    console.log('🎵 Tocando agora:', track.title);
+    // Calcular tempo total até começar a tocar
+    const startTime = trackStartTimes.get(`${queue.guild.id}-${track.url}`);
+    if (startTime) {
+        const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`\n🎵 [PLAYBACK] Tocando agora: "${track.title}"`);
+        console.log(`   ⏱️  [TIMING] ⚡ TEMPO TOTAL ATÉ TOCAR: ${totalTime}s`);
+        trackStartTimes.delete(`${queue.guild.id}-${track.url}`);
+    } else {
+        console.log('🎵 Tocando agora:', track.title);
+    }
+    
+    // Emitir para Socket.IO (web interface)
+    if (socketIO) {
+        const startTime = trackStartTimes.get(`${queue.guild.id}-${track.url}`);
+        const totalTime = startTime ? ((Date.now() - startTime) / 1000).toFixed(2) : null;
+        socketIO.to(queue.guild.id).emit('playerUpdate', { 
+            action: 'playing',
+            track: {
+                title: track.title,
+                author: track.author,
+                thumbnail: track.thumbnail,
+                duration: track.duration
+            },
+            timing: totalTime ? { totalToStartSec: Number(totalTime) } : undefined
+        });
+    }
+    
+    // Enviar mensagem de "Now Playing" se temos canal de texto
+    if (queue.metadata?.channel) {
+        try {
+            const startTime = trackStartTimes.get(`${queue.guild.id}-${track.url}`);
+            const totalTime = startTime ? ((Date.now() - startTime) / 1000).toFixed(2) : null;
+            const embed = new EmbedBuilder()
+                .setTitle('🎵 Now Playing')
+                .setColor(0x1DB954)
+                .setDescription(`**${track.title}**\n🎤 ${track.author || 'Unknown'}`)
+                .setThumbnail(track.thumbnail)
+                .addFields(
+                    { name: '⏱️ Duration', value: track.duration || 'Unknown', inline: true },
+                    { name: '🎵 Queue', value: `${queue.tracks.size} track(s)`, inline: true },
+                    { name: '🔗 Link', value: `[Open on YouTube](${track.url})`, inline: true }
+                )
+                .setTimestamp();
+            if (totalTime) {
+                embed.setFooter({ text: `⚡ Started in ${totalTime}s` });
+                // limpar para evitar reutilização
+                trackStartTimes.delete(`${queue.guild.id}-${track.url}`);
+            }
+            
+            await queue.metadata.channel.send({ embeds: [embed] });
+        } catch (error) {
+            console.error('❌ Error sending now playing message:', error.message);
+        }
     }
 });
 
@@ -739,9 +868,27 @@ client.on('interactionCreate', async interaction => {
                 loadingEmbed.setFooter({ text: '🎬 Searching on YouTube...' });
                 await interaction.editReply({ embeds: [loadingEmbed] });
                 
-                const searchResult = await player.search(searchQuery, {
-                    requestedBy: interaction.user
-                });
+                // Tentar pesquisa rápida (Piped) para obter URL direta antes do player.search
+                let searchResult;
+                try {
+                    const { fastSearchUrl } = require('../utils/fast-search');
+                    const fastUrl = await fastSearchUrl(searchQuery);
+                    if (fastUrl) {
+                        searchResult = await player.search(fastUrl, { requestedBy: interaction.user });
+                    } else {
+                        searchResult = await player.search(searchQuery, { requestedBy: interaction.user });
+                    }
+                } catch (_) {
+                    searchResult = await player.search(searchQuery, { requestedBy: interaction.user });
+                }
+                // Prefetch stream em background (não aguardar)
+                try {
+                    const first = searchResult?.tracks?.[0];
+                    if (first && first.url) {
+                        const { prefetchStreamUrl } = require('../utils/youtube-extractor');
+                        prefetchStreamUrl(first.url).catch(() => {});
+                    }
+                } catch (_) {}
 
                 if (!searchResult.hasTracks()) {
                     // Atualizar embed com erro
@@ -784,8 +931,11 @@ client.on('interactionCreate', async interaction => {
                 const wasPlaying = queue.isPlaying();
                 const queueSize = queue.size;
 
-                // Adicionar à fila e reproduzir
-                await playTrack(queue, searchResult.tracks[0]);
+                // Adicionar à fila e reproduzir com timing
+                const menuStartTime = Date.now();
+                console.log(`\n⏱️  [TIMING] ===== INICIANDO PROCESSO DE REPRODUÇÃO (MENU) =====`);
+                console.log(`   ⏱️  [TIMING] Tempo inicial: ${new Date().toISOString()}`);
+                await playTrack(queue, searchResult.tracks[0], menuStartTime);
 
                 if (!wasPlaying && queue.isPlaying()) {
                     embed.setTitle('🎵 Now Playing');
@@ -912,9 +1062,25 @@ client.on('interactionCreate', async interaction => {
                         const spotifyTrack = fallbackTracks[0];
                         const searchQuery = `${spotifyTrack.artists[0].name} - ${spotifyTrack.name}`;
                         
-                        const fallbackResult = await player.search(searchQuery, {
-                            requestedBy: interaction.user
-                        });
+                        let fallbackResult;
+                        try {
+                            const { fastSearchUrl } = require('../utils/fast-search');
+                            const fastUrl = await fastSearchUrl(searchQuery);
+                            if (fastUrl) {
+                                fallbackResult = await player.search(fastUrl, { requestedBy: interaction.user });
+                            } else {
+                                fallbackResult = await player.search(searchQuery, { requestedBy: interaction.user });
+                            }
+                        } catch (_) {
+                            fallbackResult = await player.search(searchQuery, { requestedBy: interaction.user });
+                        }
+                    try {
+                        const first = fallbackResult?.tracks?.[0];
+                        if (first && first.url) {
+                            const { prefetchStreamUrl } = require('../utils/youtube-extractor');
+                            prefetchStreamUrl(first.url).catch(() => {});
+                        }
+                    } catch (_) {}
                         
                         if (fallbackResult.hasTracks()) {
                             console.log(`   ✅ Fallback found music via Spotify: "${spotifyTrack.name}"`);
@@ -993,12 +1159,43 @@ client.on('interactionCreate', async interaction => {
                         .setCustomId(selectionId)
                         .setPlaceholder('Choose a song to play...')
                         .addOptions(
-                            tracks.slice(0, 25).map((track, index) => ({
-                                label: track.name.length > 100 ? track.name.substring(0, 97) + '...' : track.name,
-                                description: `${track.artists.map(a => a.name).join(', ')} • ${Math.floor(track.duration_ms / 60000)}:${((track.duration_ms % 60000) / 1000).toFixed(0).padStart(2, '0')}`,
-                                value: index.toString(),
-                                emoji: '🎵'
-                            }))
+                            tracks.slice(0, 25).map((track, index) => {
+                                // Formatar label (máximo 100 caracteres)
+                                const label = track.name.length > 100 ? track.name.substring(0, 97) + '...' : track.name;
+                                
+                                // Formatar descrição (máximo 100 caracteres)
+                                const duration = `${Math.floor(track.duration_ms / 60000)}:${((track.duration_ms % 60000) / 1000).toFixed(0).padStart(2, '0')}`;
+                                const artistsText = track.artists.map(a => a.name).join(', ');
+                                let descriptionText = `${artistsText} • ${duration}`;
+                                
+                                // Garantir que a descrição nunca exceda 100 caracteres
+                                if (descriptionText.length > 100) {
+                                    // Reservar espaço para " • " e duração (ex: " • 7:50" = 7 caracteres)
+                                    const durationWithSeparator = ` • ${duration}`;
+                                    const maxArtistsLength = 100 - durationWithSeparator.length;
+                                    if (maxArtistsLength > 10) {
+                                        // Se couber alguns artistas, truncar a lista
+                                        descriptionText = artistsText.substring(0, maxArtistsLength - 3) + '...' + durationWithSeparator;
+                                        // Garantir que não exceda 100 (segurança extra)
+                                        if (descriptionText.length > 100) {
+                                            descriptionText = descriptionText.substring(0, 97) + '...';
+                                        }
+                                    } else {
+                                        // Se não couber, usar apenas duração
+                                        descriptionText = duration;
+                                    }
+                                }
+                                
+                                // Garantia final: nunca exceder 100 caracteres
+                                const finalDescription = descriptionText.length > 100 ? descriptionText.substring(0, 97) + '...' : descriptionText;
+                                
+                                return {
+                                    label: label,
+                                    description: finalDescription,
+                                    value: index.toString(),
+                                    emoji: '🎵'
+                                };
+                            })
                         );
 
                     // Armazenar as músicas timerariamente
@@ -1066,9 +1263,24 @@ client.on('interactionCreate', async interaction => {
                 const youtubeStart = Date.now();
                 
                 try {
-                    searchResult = await player.search(searchQuery, {
-                requestedBy: interaction.user
-            });
+                    try {
+                        const { fastSearchUrl } = require('../utils/fast-search');
+                        const fastUrl = await fastSearchUrl(searchQuery);
+                        if (fastUrl) {
+                            searchResult = await player.search(fastUrl, { requestedBy: interaction.user });
+                        } else {
+                            searchResult = await player.search(searchQuery, { requestedBy: interaction.user });
+                        }
+                    } catch (_) {
+                        searchResult = await player.search(searchQuery, { requestedBy: interaction.user });
+                    }
+                    try {
+                        const first = searchResult?.tracks?.[0];
+                        if (first && first.url) {
+                            const { prefetchStreamUrl } = require('../utils/youtube-extractor');
+                            prefetchStreamUrl(first.url).catch(() => {});
+                        }
+                    } catch (_) {}
                     
                     if (process.env.DEBUG === 'true') {
                         console.log(`   📊 YouTube result:`, {
@@ -1196,9 +1408,11 @@ client.on('interactionCreate', async interaction => {
             const wasPlaying = queue.isPlaying();
             const queueSize = queue.size;
 
-            // Adicionar à fila e reproduzir
+            // Adicionar à fila e reproduzir com timing
+            console.log(`\n⏱️  [TIMING] ===== INICIANDO PROCESSO DE REPRODUÇÃO =====`);
+            console.log(`   ⏱️  [TIMING] Tempo inicial: ${new Date().toISOString()}`);
             console.log(`   ▶️ Adding to queue and starting playback...`);
-            await playTrack(queue, searchResult.tracks[0]);
+            await playTrack(queue, searchResult.tracks[0], startTime);
 
             const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
             
@@ -1402,7 +1616,7 @@ client.on('interactionCreate', async interaction => {
                 .addFields(
                     { name: '📊 Total', value: `${queue.size} song(s)`, inline: true },
                     { name: '📄 Page', value: `${page}/${totalPages}`, inline: true },
-                    { name: '⏱️ Total Duration', value: formatDuration(queue.duration), inline: true }
+                    { name: '⏱️ Total Duration', value: formatDuration(calculateQueueDuration(queue)), inline: true }
                 )
                 .setTimestamp();
 

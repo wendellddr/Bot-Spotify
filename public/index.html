@@ -46,7 +46,17 @@
             <div class="topbar">
                 <div class="search-bar">
                     <i class="fas fa-search search-icon"></i>
-                    <input type="text" id="searchInput" placeholder="What do you want to play?">
+                    <input type="text" id="searchInput" placeholder="What do you want to play?" autocomplete="off">
+                    <div id="autocompleteContainer" class="autocomplete-container" style="display: none;">
+                        <div id="searchHistoryContainer" class="search-history-container" style="display: none;">
+                            <div class="search-history-header">Recent searches</div>
+                            <div id="searchHistoryList" class="search-history-list"></div>
+                        </div>
+                    </div>
+                    <div id="processingIndicator" class="processing-indicator" style="display: none;">
+                        <div class="processing-spinner"></div>
+                        <span>Processing...</span>
+                    </div>
                 </div>
                 
                 <div class="topbar-controls">
@@ -68,7 +78,7 @@
             <!-- Content Area -->
             <div class="content-area">
                 <!-- Now Playing (when music is playing) -->
-                <div class="now-playing-container" style="display: none;">
+                <div id="nowPlayingContainer" class="now-playing-container" style="display: none;">
                     <div class="now-playing-banner">
                         <div class="now-playing-thumb" id="trackThumbnail">
                             <i class="fas fa-music"></i>
@@ -127,6 +137,29 @@
                             <span id="currentTime" class="time-label">0:00</span>
                             <span id="totalTime" class="time-label">0:00</span>
                         </div>
+                    </div>
+
+                    <div class="queue-actions">
+                        <button id="shuffleBtn" class="queue-action-btn" disabled>
+                            <i class="fas fa-random"></i>
+                            <span>Shuffle</span>
+                        </button>
+                        <button id="clearBtn" class="queue-action-btn" disabled>
+                            <i class="fas fa-trash"></i>
+                            <span>Clear</span>
+                        </button>
+                        <button id="volumeBtn" class="queue-action-btn volume-btn">
+                            <i class="fas fa-volume-up" id="volumeIcon"></i>
+                            <span id="volumeText">Volume</span>
+                            <div id="volumeSliderContainer" class="volume-slider-container" style="display: none;">
+                                <div class="volume-slider-wrapper">
+                                    <i class="fas fa-volume-mute volume-icon-small"></i>
+                                    <input type="range" id="volumeSlider" class="volume-slider" min="0" max="100" value="50" step="1">
+                                    <i class="fas fa-volume-up volume-icon-small"></i>
+                                    <div class="volume-value" id="volumeValue">50%</div>
+                                </div>
+                            </div>
+                        </button>
                     </div>
 
                     <div id="queueList" class="queue-list-spotify">
