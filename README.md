@@ -93,7 +93,10 @@ Antes de começar, você precisa de:
    CLIENT_ID=seu_client_id_do_discord_aqui
    SPOTIFY_CLIENT_ID=seu_spotify_client_id_aqui
    SPOTIFY_CLIENT_SECRET=seu_spotify_client_secret_aqui
+   YOUTUBE_API_KEY=seu_youtube_api_key_aqui (OBRIGATÓRIA - para buscas)
    ```
+   
+   > ⚡ **Importante:** `YOUTUBE_API_KEY` é **OBRIGATÓRIA** para o bot funcionar. Veja o guia completo em [CONFIGURAR_YOUTUBE_API.md](CONFIGURAR_YOUTUBE_API.md)
 
    > ⚠️ **Importante**: Nunca compartilhe seu arquivo `.env`! Ele contém informações sensíveis.
 

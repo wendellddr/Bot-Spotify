@@ -1,180 +1,98 @@
 const { BaseExtractor } = require('discord-player');
 const { spawn } = require('child_process');
 const { Readable } = require('stream');
-// Usar fetch nativo se disponível
-const fetch = (typeof globalThis.fetch === 'function') ? globalThis.fetch : require('node-fetch');
 const path = require('path');
 const fs = require('fs');
+const { searchYouTubeAPI } = require('./youtube-api-search');
 
-// Timeouts e constantes
-const YTDLP_TIMEOUT = 10000; // 10 segundos (otimizado para performance)
-const YTDLP_SEARCH_TIMEOUT = 5000; // 5 segundos para buscas (mais agressivo)
-const SEARCH_CACHE_TTL = 30 * 60 * 1000; // 30 minutos (cache mais longo)
-const VIDEO_INFO_CACHE_TTL = 60 * 60 * 1000; // 1 hora para informações de vídeo (raramente mudam)
+const YTDLP_TIMEOUT = 10000;
+const SEARCH_CACHE_TTL = 30 * 60 * 1000;
+const PREHEAT_STREAM_TTL = 5 * 60 * 1000; // 5 minutos
+const searchCache = new Map();
 
-// Cache de buscas do YouTube (LRU simples)
-class LRUCache {
-    constructor(maxSize = 200) {
-        this.maxSize = maxSize;
-        this.cache = new Map();
-    }
-    
-    get(key) {
-        if (!this.cache.has(key)) return null;
-        const value = this.cache.get(key);
-        // Mover para o final (mais recente)
-        this.cache.delete(key);
-        this.cache.set(key, value);
-        return value;
-    }
-    
-    set(key, value) {
-        if (this.cache.has(key)) {
-            this.cache.delete(key);
-        } else if (this.cache.size >= this.maxSize) {
-            // Remover o mais antigo (primeiro item)
-            const firstKey = this.cache.keys().next().value;
-            this.cache.delete(firstKey);
-        }
-        this.cache.set(key, value);
-    }
-    
-    size() {
-        return this.cache.size;
-    }
-}
-
-const youtubeSearchCache = new LRUCache(300); // Cache maior para buscas
-const videoInfoCache = new LRUCache(200); // Cache para informações de vídeo
-const streamUrlCache = new LRUCache(300); // Cache para URLs de stream (warmup)
-const STREAM_URL_TTL = 10 * 60 * 1000; // 10 minutos
-
-function getCachedStreamUrl(url) {
-    const cached = streamUrlCache.get(url);
-    if (cached && Date.now() < cached.expiry) {
-        return cached.url;
-    }
-    return null;
-}
-
-function extractYouTubeId(url) {
-    try {
-        const u = new URL(url);
-        if (u.hostname.includes('youtu.be')) return u.pathname.slice(1);
-        if (u.searchParams.get('v')) return u.searchParams.get('v');
-        const parts = u.pathname.split('/');
-        const idx = parts.indexOf('watch');
-        if (idx >= 0 && u.searchParams.get('v')) return u.searchParams.get('v');
-        return null;
-    } catch (_) {
-        return null;
-    }
-}
-
-async function fetchPipedStream(url) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000);
-    try {
-        const endpoint = `https://piped.video/api/v1/streams?url=${encodeURIComponent(url)}`;
-        const res = await fetch(endpoint, { signal: controller.signal });
-        if (!res.ok) return null;
-        const data = await res.json();
-        const streams = data?.audioStreams || [];
-        if (!Array.isArray(streams) || streams.length === 0) return null;
-        // Prefer m4a > webm, maior bitrate primeiro
-        streams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-        const preferred = streams.find(s => (s.mimeType || '').includes('mp4')) || streams[0];
-        return preferred?.url || null;
-    } catch (_) {
-        return null;
-    } finally {
-        clearTimeout(timeout);
-    }
-}
-
-function ytdlpStreamUrl(ytdlpPath, url) {
-    return new Promise((resolve) => {
-        const ytdlp = spawn(ytdlpPath, [
-            '-f', 'bestaudio[ext=m4a][filesize<50M]/bestaudio[ext=webm][filesize<50M]/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
-            '-g',
-            '--no-playlist',
-            '--no-warnings',
-            '--no-cache-dir',
-            '--quiet',
-            '--no-check-certificate',
-            '--force-ipv4',
-            '--socket-timeout', '5',
-            '--fragment-retries', '1',
-            '--retries', '1',
-            '--ignore-errors',
-            '--prefer-free-formats',
-            '--hls-prefer-native',
-            '--no-mtime',
-            '--no-write-thumbnail',
-            '--no-write-info-json',
-            '--extractor-args', 'youtube:player_client=android,web',
-            url
-        ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-
-        let out = '';
-        const killTimer = setTimeout(() => { try { ytdlp.kill(); } catch (_) {} }, 7000);
-        ytdlp.stdout.on('data', d => { out += d.toString(); });
-        ytdlp.on('close', () => {
-            clearTimeout(killTimer);
-            const line = out.trim().split(/\r?\n/).find(Boolean);
-            resolve(line || null);
-        });
-        ytdlp.on('error', () => resolve(null));
-    });
-}
-
-async function resolveStreamUrl(ytdlpPath, url) {
-    const cached = getCachedStreamUrl(url);
-    if (cached) return cached;
-    // Correr em paralelo: Piped e yt-dlp; o primeiro a responder vence
-    const start = Date.now();
-    const winner = await Promise.race([
-        fetchPipedStream(url),
-        ytdlpStreamUrl(ytdlpPath, url)
-    ]);
-    if (winner) {
-        streamUrlCache.set(url, { url: winner, expiry: Date.now() + STREAM_URL_TTL });
-        if (process.env.DEBUG === 'true') {
-            console.log(`   ⚡ [RACE] Stream resolvida em ${(Date.now() - start)}ms`);
-        }
-        return winner;
-    }
-    // Se nenhum venceu dentro do prazo, tenta fallback final com yt-dlp normal (bloqueante curto)
-    const fallback = await ytdlpStreamUrl(ytdlpPath, url);
-    if (fallback) {
-        streamUrlCache.set(url, { url: fallback, expiry: Date.now() + STREAM_URL_TTL });
-    }
-    return fallback;
-}
+// Cache de streams pré-aquecidos: url -> { stream, expiry }
+const preheatedStreams = new Map();
 
 class YouTubeExtractor extends BaseExtractor {
     static identifier = 'com.custom.youtube-extractor';
     
     constructor() {
         super();
-        // Tentar encontrar yt-dlp
         this.ytdlpPath = this.findYtDlp();
+    }
+    
+    // Pré-aquecer stream em background (não bloqueia)
+    preheatStream(url) {
+        if (!url) return;
+        
+        // Verificar cache primeiro (evita criar stream duplicado) - SEM LOGS (rápido)
+        const cached = preheatedStreams.get(url);
+        if (cached && Date.now() < cached.expiry) {
+            // Stream já está pré-aquecido e válido
+            return;
+        }
+        
+        try {
+            // Criar stream em background (não bloqueia) - SEM LOGS durante criação
+            const stream = this.getStreamDirect(url);
+            
+            // Armazenar no cache com timestamp de criação
+            preheatedStreams.set(url, {
+                stream: stream,
+                expiry: Date.now() + PREHEAT_STREAM_TTL,
+                createdAt: Date.now() // Timestamp para calcular economia de tempo
+            });
+            
+            // Logs apenas em background (não bloqueia)
+            setImmediate(() => {
+                console.log(`✅ [PREHEAT] Stream pré-aquecido: ${url.substring(0, 50)}...`);
+            });
+            
+            // Limpar quando stream terminar ou der erro (sem logs excessivos)
+            stream.on('end', () => {
+                preheatedStreams.delete(url);
+            });
+            
+            stream.on('error', () => {
+                preheatedStreams.delete(url);
+            });
+            
+            // Permitir que o stream comece a baixar dados em background
+            // Não precisa aguardar - o stream já está iniciado
+        } catch (error) {
+            // Erro silencioso - não é crítico para pré-aquecimento
+        }
+    }
+    
+    // Limpar streams pré-aquecidos antigos
+    cleanupPreheatedStreams() {
+        const now = Date.now();
+        for (const [url, cached] of preheatedStreams.entries()) {
+            if (now >= cached.expiry) {
+                try {
+                    if (!cached.stream.destroyed) {
+                        cached.stream.destroy();
+                    }
+                } catch {}
+                preheatedStreams.delete(url);
+            }
+        }
     }
     
     findYtDlp() {
         // Verificar se yt-dlp.exe está no diretório local
-        const localPath = path.join(__dirname, 'yt-dlp.exe');
+        const localPath = path.join(__dirname, '..', '..', 'bin', 'yt-dlp.exe');
         if (fs.existsSync(localPath)) {
-            if (process.env.DEBUG === 'true') {
-                console.log('✅ yt-dlp encontrado localmente');
-            }
             return localPath;
         }
         
-        // Tentar no PATH do sistema
-        if (process.env.DEBUG === 'true') {
-            console.log('⚠️ yt-dlp.exe não encontrado localmente, tentando PATH do sistema');
+        // Tentar no diretório atual
+        const localPath2 = path.join(__dirname, 'yt-dlp.exe');
+        if (fs.existsSync(localPath2)) {
+            return localPath2;
         }
+        
+        // Tentar no PATH do sistema
         return 'yt-dlp';
     }
     
@@ -190,28 +108,89 @@ class YouTubeExtractor extends BaseExtractor {
     
     async handle(query, context) {
         try {
-            // Se for uma busca, primeiro obter URL do YouTube
-            let videoUrl = query;
-            if (!/^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)/.test(query)) {
-                videoUrl = await this.searchYouTube(query);
-                if (!videoUrl) {
+            const handleStart = Date.now();
+            console.log(`⏱️ [TIMING] Extractor.handle - Iniciado: "${query.substring(0, 50)}"`);
+            
+            const Track = require('discord-player').Track;
+            const isUrl = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)/.test(query);
+            
+            // Se for busca (não URL), usar API diretamente (mais rápido)
+            // Retornar múltiplos resultados para permitir seleção
+            if (!isUrl) {
+                const searchStart = Date.now();
+                const searchResults = await this.searchAndGetInfo(query, 10); // Buscar até 10 resultados
+                const searchEnd = Date.now();
+                console.log(`⏱️ [TIMING] Extractor.handle - searchAndGetInfo: ${searchEnd - searchStart}ms`);
+                
+                if (!searchResults) {
                     return this.emptyResponse();
                 }
+
+                // Se for array (múltiplos resultados)
+                if (Array.isArray(searchResults)) {
+                    const tracksStart = Date.now();
+                    const tracks = searchResults.map(result => {
+                        // ⚡ PRÉ-AQUECER: Iniciar stream em background para TODAS as opções
+                        this.preheatStream(result.url);
+                        
+                        return new Track(context.player, {
+                            title: result.title,
+                            author: result.uploader || 'Unknown Artist',
+                            url: result.url,
+                            duration: this.parseDuration(result.duration),
+                            thumbnail: result.thumbnail,
+                            views: result.view_count || 0,
+                            requestedBy: context.requestedBy,
+                            source: 'youtube'
+                        });
+                    });
+                    const tracksEnd = Date.now();
+                    console.log(`⏱️ [TIMING] Extractor.handle - Criar tracks (${tracks.length}): ${tracksEnd - tracksStart}ms`);
+                    
+                    const handleEnd = Date.now();
+                    console.log(`⏱️ [TIMING] Extractor.handle - TOTAL (múltiplos): ${handleEnd - handleStart}ms`);
+                    
+                    // Retornar múltiplos tracks para que o bot possa mostrar menu
+                    return { loadType: 'SEARCH_RESULT', tracks: tracks };
+                }
+
+                // Se for objeto único (compatibilidade - não deveria acontecer com maxResults=10)
+                // ⚡ PRÉ-AQUECER: Iniciar stream em background (não bloqueia)
+                this.preheatStream(searchResults.url);
+                
+                const trackStart = Date.now();
+                const track = new Track(context.player, {
+                    title: searchResults.title,
+                    author: searchResults.uploader || 'Unknown Artist',
+                    url: searchResults.url,
+                    duration: this.parseDuration(searchResults.duration),
+                    thumbnail: searchResults.thumbnail,
+                    views: searchResults.view_count || 0,
+                    requestedBy: context.requestedBy,
+                    source: 'youtube'
+                });
+                const trackEnd = Date.now();
+                console.log(`⏱️ [TIMING] Extractor.handle - Criar track único: ${trackEnd - trackStart}ms`);
+                
+                const handleEnd = Date.now();
+                console.log(`⏱️ [TIMING] Extractor.handle - TOTAL (único): ${handleEnd - handleStart}ms`);
+                
+                return { loadType: 'TRACK_LOADED', tracks: [track] };
             }
             
-            // Obter informações do vídeo usando yt-dlp
-            const videoInfo = await this.getVideoInfo(videoUrl);
+            // Se for URL, obter info via yt-dlp (necessário para metadados completos)
+            const videoInfo = await this.getVideoInfo(query);
             if (!videoInfo) {
                 return this.emptyResponse();
             }
             
-            // Criar Track usando o BaseExtractor
-            // IMPORTANTE: usar videoUrl original, não streamUrl!
-            const Track = require('discord-player').Track;
+            // ⚡ PRÉ-AQUECER: Iniciar stream em background (não bloqueia)
+            this.preheatStream(query);
+            
             const track = new Track(context.player, {
                 title: videoInfo.title,
                 author: videoInfo.uploader || 'Unknown Artist',
-                url: videoUrl,  // URL original do YouTube, não streamUrl
+                url: query,
                 duration: this.parseDuration(videoInfo.duration),
                 thumbnail: videoInfo.thumbnail,
                 views: videoInfo.view_count || 0,
@@ -219,79 +198,161 @@ class YouTubeExtractor extends BaseExtractor {
                 source: 'youtube'
             });
             
-            return {
-                loadType: 'TRACK_LOADED',
-                tracks: [track]
-            };
+            return { loadType: 'TRACK_LOADED', tracks: [track] };
         } catch (error) {
-            // Log apenas erros importantes
             if (!error.message?.includes('Timeout')) {
-                console.error('❌ YouTube Extractor: Erro ao processar:', error.message);
+                console.error('❌ YouTube Extractor:', error.message);
             }
             return this.emptyResponse();
         }
     }
     
     async stream(track) {
-        try {
-            const streamStartTime = Date.now();
-            console.log(`   ⏱️  [TIMING] Obtendo stream URL para: "${track.title}"`);
+        const streamStart = Date.now();
+        
+        // Limpar streams antigos periodicamente
+        this.cleanupPreheatedStreams();
+        
+        // Verificar se já tem stream pré-aquecido
+        const preheated = preheatedStreams.get(track.url);
+        if (preheated && Date.now() < preheated.expiry) {
+            // ⚡ Usar stream pré-aquecido (instantâneo!)
+            const preheatCheckTime = Date.now() - streamStart;
+            const preheatAge = preheated.createdAt ? Date.now() - preheated.createdAt : 0;
             
-            // Tentar cache primeiro
-            const cached = getCachedStreamUrl(track.url);
-            let stream;
-            if (cached) {
-                console.log('   ⚡ [CACHE] Usando stream URL em cache');
-                stream = cached;
-            } else {
-                // Usar yt-dlp para obter stream direto
-                stream = await this.getAudioStream(track.url);
-                // Armazenar no cache
-                streamUrlCache.set(track.url, { url: stream, expiry: Date.now() + STREAM_URL_TTL });
-            }
+            // Estimar tempo economizado (assumindo que criar novo stream levaria ~2-5s)
+            const estimatedTimeWithoutPreheat = 3000; // 3 segundos estimados
+            const timeSaved = estimatedTimeWithoutPreheat - preheatCheckTime;
             
-            const streamTime = ((Date.now() - streamStartTime) / 1000).toFixed(2);
-            console.log(`   ⏱️  [TIMING] Stream URL obtida: ${streamTime}s`);
+            // Log em background (não bloqueia)
+            setImmediate(() => {
+                console.log(`⚡ [STREAM] ✅ PRÉ-AQUECIDO: "${track.title.substring(0, 40)}..." | Economia: ~${(timeSaved / 1000).toFixed(1)}s | Idade: ${(preheatAge / 1000).toFixed(1)}s`);
+            });
             
-            return stream;
-        } catch (error) {
-            // Re-throw para que o discord-player possa tratar
-            throw error;
+            preheatedStreams.delete(track.url); // Remover do cache (já está sendo usado)
+            return preheated.stream;
         }
+        
+        // Se não tem pré-aquecido, criar novo
+        const createStart = Date.now();
+        const stream = this.getStreamDirect(track.url);
+        const createEnd = Date.now();
+        const createTime = createEnd - createStart;
+        
+        // Log em background (não bloqueia)
+        setImmediate(() => {
+            console.log(`⏳ [STREAM] ❌ SEM PRÉ-AQUECIMENTO: "${track.title.substring(0, 40)}..." | Criado em: ${(createTime / 1000).toFixed(1)}s`);
+        });
+        
+        return stream;
     }
     
-    async searchYouTube(query) {
-        // Verificar cache primeiro
-        const cacheKey = query.toLowerCase().trim();
-        const cached = youtubeSearchCache.get(cacheKey);
-        if (cached && Date.now() < cached.expiry) {
-            return cached.url;
+    getStreamDirect(url) {
+        const ytdlp = spawn(this.ytdlpPath, [
+            '-f', 'bestaudio',
+            '-o', '-',
+            '--no-playlist',
+            '--quiet',
+            '--no-warnings',
+            '--socket-timeout', '10',
+            '--retries', '1',
+            '--no-cache-dir',
+            url
+        ], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true
+        });
+        
+        const stream = new Readable({ read() {} });
+        
+        ytdlp.stdout.on('data', (chunk) => stream.push(chunk));
+        ytdlp.stdout.on('end', () => stream.push(null));
+        ytdlp.stdout.on('error', (err) => stream.destroy(err));
+        ytdlp.on('error', (err) => stream.destroy(err));
+        
+        stream.on('close', () => {
+            try {
+                if (!ytdlp.killed) ytdlp.kill();
+            } catch {}
+        });
+        
+        return stream;
+    }
+    
+    async searchAndGetInfo(query, maxResults = 1) {
+        const searchStart = Date.now();
+        const cacheKey = `${query.toLowerCase().trim()}_${maxResults}`;
+        const cached = searchCache.get(cacheKey);
+        if (cached?.info && Date.now() < cached.expiry) {
+            console.log(`⏱️ [TIMING] searchAndGetInfo - Cache hit: ${Date.now() - searchStart}ms`);
+            return cached.info;
         }
 
-        // Usar yt-dlp para buscar no YouTube
-        return new Promise((resolve, reject) => {
-            // yt-dlp pode buscar usando "ytsearch:query"
-            const searchQuery = `ytsearch1:${query}`;
+        const apiKey = process.env.YOUTUBE_API_KEY;
+        if (!apiKey) return null;
+
+        const apiStart = Date.now();
+        const apiResult = await searchYouTubeAPI(query, apiKey, maxResults);
+        const apiEnd = Date.now();
+        console.log(`⏱️ [TIMING] searchAndGetInfo - API call: ${apiEnd - apiStart}ms`);
+        
+        if (!apiResult) return null;
+
+        // Se for array (múltiplos resultados)
+        if (Array.isArray(apiResult)) {
+            const results = apiResult.map(item => ({
+                url: item.url,
+                title: item.title,
+                uploader: item.uploader || 'Unknown Artist',
+                duration: item.duration || 0,
+                thumbnail: item.thumbnail || '',
+                view_count: item.viewCount || 0
+            }));
+
+            searchCache.set(cacheKey, {
+                info: results,
+                expiry: Date.now() + SEARCH_CACHE_TTL
+            });
+
+            const totalTime = Date.now() - searchStart;
+            console.log(`⏱️ [TIMING] searchAndGetInfo - TOTAL (múltiplos): ${totalTime}ms`);
+            return results;
+        }
+
+        // Se for objeto único (compatibilidade)
+        const processStart = Date.now();
+        const videoInfo = {
+            url: apiResult.url,
+            title: apiResult.title,
+            uploader: apiResult.uploader || 'Unknown Artist',
+            duration: apiResult.duration,
+            thumbnail: apiResult.thumbnail,
+            view_count: apiResult.viewCount || 0
+        };
+        const processEnd = Date.now();
+        console.log(`⏱️ [TIMING] searchAndGetInfo - Processar resultado: ${processEnd - processStart}ms`);
+
+        searchCache.set(cacheKey, {
+            url: apiResult.url,
+            info: videoInfo,
+            expiry: Date.now() + SEARCH_CACHE_TTL
+        });
+
+        const totalTime = Date.now() - searchStart;
+        console.log(`⏱️ [TIMING] searchAndGetInfo - TOTAL (único): ${totalTime}ms`);
+        return videoInfo;
+    }
+    
+    async getVideoInfo(url) {
+        return new Promise((resolve) => {
             const ytdlp = spawn(this.ytdlpPath, [
                 '--dump-json',
                 '--no-playlist',
-                '--no-warnings',
-                '--no-cache-dir',
-                '--skip-download',
                 '--quiet',
-                '--no-check-certificate',
-                '--socket-timeout', '5',
-                '--fragment-retries', '1',
+                '--no-warnings',
+                '--socket-timeout', '8',
                 '--retries', '1',
-                '--ignore-errors',
-                '--no-mtime',
-                '--no-write-thumbnail',
-                '--no-write-info-json',
-                '--no-write-description',
-                '--no-write-annotations',
-                '--extractor-args', 'youtube:player_client=android,web',
-                '--default-search', 'auto',
-                searchQuery
+                url
             ], {
                 stdio: ['ignore', 'pipe', 'pipe'],
                 windowsHide: true
@@ -300,203 +361,52 @@ class YouTubeExtractor extends BaseExtractor {
             let output = '';
             let hasResolved = false;
             
-            // Timeout otimizado para buscas (mais rápido)
             const timeout = setTimeout(() => {
                 if (!hasResolved) {
                     hasResolved = true;
-                    ytdlp.kill();
+                    try { ytdlp.kill(); } catch {}
                     resolve(null);
                 }
-            }, YTDLP_SEARCH_TIMEOUT);
+            }, YTDLP_TIMEOUT);
             
-            ytdlp.stdout.on('data', (data) => {
-                output += data.toString();
-            });
-            
-            ytdlp.stderr.on('data', (data) => {
-                // Ignorar warnings do yt-dlp em stderr
-            });
+            ytdlp.stdout.on('data', (data) => { output += data.toString(); });
+            ytdlp.stderr.on('data', () => {});
             
             ytdlp.on('close', (code) => {
                 if (hasResolved) return;
-                
                 clearTimeout(timeout);
-                if (code === 0) {
+                if (code === 0 || code === null) {
                     try {
-                        const info = JSON.parse(output);
-                        if (info && info.webpage_url) {
-                            // Armazenar no cache
-                            youtubeSearchCache.set(cacheKey, {
-                                url: info.webpage_url,
-                                expiry: Date.now() + SEARCH_CACHE_TTL
-                            });
-                            
-                            // Cache LRU gerencia automaticamente o tamanho
-                            
-                            resolve(info.webpage_url);
-                        } else {
-                            resolve(null);
-                        }
-                    } catch (error) {
+                        resolve(JSON.parse(output));
+                    } catch {
                         resolve(null);
                     }
                 } else {
                     resolve(null);
                 }
-                hasResolved = true;
             });
             
-            ytdlp.on('error', (error) => {
-                if (hasResolved) return;
-                clearTimeout(timeout);
-                hasResolved = true;
-                resolve(null);
-            });
-        });
-    }
-    
-    getVideoInfo(url) {
-        // Verificar cache primeiro
-        const cached = videoInfoCache.get(url);
-        if (cached && Date.now() < cached.expiry) {
-            return Promise.resolve(cached.data);
-        }
-
-        return new Promise((resolve, reject) => {
-            const ytdlp = spawn(this.ytdlpPath, [
-                '--dump-json',
-                '--no-playlist',
-                '--no-warnings',
-                '--no-cache-dir',
-                '--skip-download',
-                '--quiet',
-                '--no-check-certificate',
-                '--socket-timeout', '10',
-                '--fragment-retries', '3',
-                '--retries', '2',
-                '--ignore-errors',
-                '--no-write-info-json',
-                url
-            ], {
-                stdio: ['ignore', 'pipe', 'pipe']
-            });
-            
-            let output = '';
-            let hasResolved = false;
-            
-            // Timeout para evitar processos travados
-            const timeout = setTimeout(() => {
+            ytdlp.on('error', () => {
                 if (!hasResolved) {
                     hasResolved = true;
-                    ytdlp.kill();
-                    reject(new Error('Timeout ao obter informações do vídeo'));
+                    clearTimeout(timeout);
+                    resolve(null);
                 }
-            }, YTDLP_TIMEOUT);
-            
-            ytdlp.stdout.on('data', (data) => {
-                output += data.toString();
-            });
-            
-            ytdlp.stderr.on('data', (data) => {
-                // Ignorar warnings do yt-dlp em stderr
-            });
-            
-            ytdlp.on('close', (code) => {
-                if (hasResolved) return;
-                
-                clearTimeout(timeout);
-                if (code === 0) {
-                    try {
-                        const info = JSON.parse(output);
-                        const videoInfo = {
-                            title: info.title,
-                            uploader: info.uploader,
-                            url: info.url || info.webpage_url || url,
-                            duration: info.duration,
-                            thumbnail: info.thumbnail,
-                            view_count: info.view_count
-                        };
-                        
-                        // Armazenar no cache (TTL mais longo para info de vídeo)
-                        videoInfoCache.set(url, {
-                            data: videoInfo,
-                            expiry: Date.now() + VIDEO_INFO_CACHE_TTL
-                        });
-                        
-                        // Cache LRU gerencia automaticamente o tamanho
-                        
-                        resolve(videoInfo);
-                    } catch (error) {
-                        reject(new Error('Erro ao parsear JSON'));
-                    }
-                } else {
-                    reject(new Error(`yt-dlp exited with code ${code}`));
-                }
-                hasResolved = true;
-            });
-            
-            ytdlp.on('error', (error) => {
-                if (hasResolved) return;
-                clearTimeout(timeout);
-                hasResolved = true;
-                reject(new Error(`yt-dlp não encontrado: ${error.message}`));
             });
         });
     }
     
-    async getAudioStream(url) {
-        // Resolve usando corrida Piped vs yt-dlp e cacheia o resultado
-        const start = Date.now();
-        const resolved = await resolveStreamUrl(this.ytdlpPath, url);
-        if (!resolved) {
-            throw new Error('Não foi possível obter URL de stream');
+    parseDuration(seconds) {
+        if (!seconds || isNaN(seconds)) return '0:00';
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = Math.floor(seconds % 60);
+        
+        if (hours > 0) {
+            return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
         }
-        const took = ((Date.now() - start) / 1000).toFixed(2);
-        console.log(`   ⏱️  [TIMING] Stream URL resolvida: ${took}s`);
-        return resolved;
-    }
-    
-    parseDuration(duration) {
-        // Discord-player espera string no formato "MM:SS" ou "HH:MM:SS"
-        if (typeof duration === 'number') {
-            // Converter segundos para "MM:SS"
-            const mins = Math.floor(duration / 60);
-            const secs = duration % 60;
-            return `${mins}:${secs.toString().padStart(2, '0')}`;
-        }
-        if (typeof duration === 'string') {
-            // Se já está no formato correto, retornar como está
-            if (duration.includes(':')) {
-                return duration;
-            }
-            // Se é número como string, converter
-            const seconds = parseInt(duration);
-            const mins = Math.floor(seconds / 60);
-            const secs = seconds % 60;
-            return `${mins}:${secs.toString().padStart(2, '0')}`;
-        }
-        return '0:00';
-    }
-    
-    emptyResponse() {
-        return {
-            loadType: 'NO_MATCHES',
-            tracks: []
-        };
+        return `${minutes}:${secs.toString().padStart(2, '0')}`;
     }
 }
 
-async function prefetchStreamUrl(url) {
-    try {
-        if (getCachedStreamUrl(url)) return getCachedStreamUrl(url);
-        const extractor = new YouTubeExtractor();
-        const stream = await extractor.getAudioStream(url);
-        streamUrlCache.set(url, { url: stream, expiry: Date.now() + STREAM_URL_TTL });
-        return stream;
-    } catch (_) {
-        return null;
-    }
-}
-
-module.exports = { YouTubeExtractor, prefetchStreamUrl, getCachedStreamUrl };
-
+module.exports = { YouTubeExtractor };

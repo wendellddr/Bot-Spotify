@@ -1,163 +1,119 @@
-// Suprimir avisos de depreciação conhecidos do Node.js (não críticos)
-if (typeof process.removeAllListeners === 'function') {
-    process.removeAllListeners('warning');
-}
-process.on('warning', (warning) => {
-    // Suprimir apenas avisos de depreciação conhecidos que não afetam a funcionalidade
-    // Mantém outros warnings importantes visíveis
-    if (warning.name === 'DeprecationWarning') {
-        const message = warning.message || '';
-        // Ignorar avisos conhecidos do Node.js que são apenas informativos
-        if (message.includes('process.emitWarning') || 
-            message.includes('buffer') ||
-            message.includes('util.inherits')) {
-            // Avisos não críticos, ignorar silenciosamente
-            return;
-        }
-    }
-    // Mostrar outros warnings que podem ser importantes
-    if (process.env.DEBUG === 'true') {
-        console.warn('⚠️', warning.name + ':', warning.message);
-    }
-});
-
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder } = require('discord.js');
+// Bot Principal - Discord Music Bot
+require('dotenv').config();
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } = require('discord.js');
 const { Player } = require('discord-player');
 const { DefaultExtractors } = require('@discord-player/extractor');
 const { YouTubeExtractor } = require('../utils/youtube-extractor');
-// Usar fetch nativo se disponível (Node.js 18+), caso contrário usar node-fetch
-const fetch = (typeof globalThis.fetch === 'function') ? globalThis.fetch : require('node-fetch');
-require('dotenv').config();
+const { initWebServer } = require('../server/web-server');
 
+// Verificar variáveis de ambiente
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+if (!DISCORD_TOKEN) {
+    console.error('❌ DISCORD_TOKEN não configurado! Configure no .env');
+    process.exit(1);
+}
+
+// Criar cliente Discord
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildVoiceStates
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.MessageContent
     ]
 });
 
-// Inicializar Discord Player com configurações otimizadas para streaming ultra-rápido
-const player = new Player(client, {
-    blockExtractors: [],
-    blockStreamFrom: [],
-    skipFFmpeg: false, // Manter FFmpeg para conversão de formatos quando necessário
-    // Configurações de streaming ultra-otimizadas
-    bufferingTimeout: 500, // Agressivo: iniciar com 0.5s de buffer
-    connectionTimeout: 20000, // Timeout de conexão reduzido (20 segundos)
-    // Configurações globais para resource saving
-    leaveOnEnd: false, // Vamos controlar manualmente com delay
-    leaveOnStop: true, // Sair quando parar manualmente
-    leaveOnEmpty: true, // Sair quando o canal ficar vazio
-    leaveOnEmptyCooldown: 15000 // Sair após 15 segundos quando todos saírem (economia)
-});
+// Criar Discord Player
+let player;
+try {
+    player = new Player(client, {
+        connectionTimeout: 30000,
+        leaveOnEmpty: false, // Desabilitar saída automática - vamos controlar manualmente
+        leaveOnEnd: false // Desabilitar saída automática - vamos controlar manualmente
+    });
+    console.log('✅ Discord Player criado');
+} catch (error) {
+    console.error('❌ Erro ao criar Discord Player:', error);
+    process.exit(1);
+}
 
-// Variável para controlar se extractors foram registrados
-let extractorsRegistered = false;
+// Armazenar timers de desconexão por servidor
+const disconnectTimers = new Map(); // guildId -> timeout
+const DISCONNECT_DELAY = 2 * 60 * 1000; // 2 minutos em milissegundos
 
-// Registrar os extractors
+// Registrar extractors
 (async () => {
     try {
-        // Registrar DefaultExtractors primeiro (inclui SoundCloud, Vimeo, etc.)
         await player.extractors.register(DefaultExtractors);
+        console.log('✅ DefaultExtractors registrados');
         
-        // Adicionar nosso YouTubeExtractor customizado usando yt-dlp (mais confiável)
-        await player.extractors.register(YouTubeExtractor, {});
+        await player.extractors.register(YouTubeExtractor);
+        console.log('✅ YouTubeExtractor registrado');
         
-        extractorsRegistered = true;
-        
-        // Listar extractors available
-        const extractors = player.extractors.store;
-        console.log(`✅ Extractors registered: ${extractors.size} available`);
-        if (process.env.DEBUG === 'true') {
-            console.log('📝 Extractors available:');
-            extractors.forEach((extractor, id) => {
-                console.log(`   - ${id}`);
-            });
-        }
+        console.log('✅ Todos os extractors registrados com sucesso');
     } catch (error) {
-        console.error('❌ Error registering extractors:', error);
+        console.error('❌ Erro ao registrar extractors:', error);
+        console.error('Stack:', error.stack);
     }
 })();
 
-// Credenciais Spotify
+// Spotify credentials
 const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
 
-let accessToken = null;
-let tokenExpiry = 0;
-let tokenRefreshPromise = null;
+let spotifyAccessToken = null;
+let spotifyTokenExpiry = 0;
 
-// Socket.IO instance from web server
-let socketIO = null;
+// Cache de buscas Spotify
+const spotifyCache = new Map();
+const SPOTIFY_CACHE_TTL = 5 * 60 * 1000;
 
-// Cache de querys do Spotify (5 minutos TTL)
-const searchCache = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutos
-const MAX_CACHE_SIZE = 100; // Limite máximo de entradas no cache
+// Função para formatar duração (segundos -> mm:ss ou hh:mm:ss)
+function formatDuration(seconds) {
+    // Verificar se é válido
+    if (seconds === null || seconds === undefined || isNaN(seconds) || seconds < 0) {
+        return 'Desconhecida';
+    }
+    
+    // Converter para número se for string
+    const duration = typeof seconds === 'string' ? parseFloat(seconds) : seconds;
+    
+    // Verificar novamente após conversão
+    if (isNaN(duration) || duration < 0) {
+        return 'Desconhecida';
+    }
+    
+    // Se for 0, retornar desconhecida
+    if (duration === 0) {
+        return 'Desconhecida';
+    }
+    
+    const hours = Math.floor(duration / 3600);
+    const minutes = Math.floor((duration % 3600) / 60);
+    const secs = Math.floor(duration % 60);
+    
+    if (hours > 0) {
+        return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `${minutes}:${secs.toString().padStart(2, '0')}`;
+}
 
-// Armazenamento timerário para seleções de música (30 segundos TTL)
+// Armazenar seleções pendentes (para menu de escolha)
 const pendingSelections = new Map();
 const SELECTION_TTL = 30 * 1000; // 30 segundos
 
-// Timeouts armazenados para poder cancelá-los se necessário
-const activeTimeouts = new Map();
-
-// Timers para controle de saída após término da fila
-const endTimers = new Map();
-
-// Limpeza periódica automática de cache e seleções expiradas (a cada 1 minuto)
-setInterval(() => {
-    const now = Date.now();
-    let cleanedCache = 0;
-    let cleanedSelections = 0;
-
-    // Limpar cache expirado
-    for (const [key, value] of searchCache.entries()) {
-        if (now > value.expiry) {
-            searchCache.delete(key);
-            cleanedCache++;
-        }
+// Obter token Spotify
+async function getSpotifyToken() {
+    if (spotifyAccessToken && Date.now() < spotifyTokenExpiry) {
+        return spotifyAccessToken;
     }
-
-    // Limpar seleções expiradas
-    for (const [id, data] of pendingSelections.entries()) {
-        if (now > data.expiry) {
-            pendingSelections.delete(id);
-            // Limpar timeout associado se existir
-            if (activeTimeouts.has(id)) {
-                clearTimeout(activeTimeouts.get(id));
-                activeTimeouts.delete(id);
-            }
-            cleanedSelections++;
-        }
+    
+    if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) {
+        return null;
     }
-
-    // Limitar tamanho do cache (remover entradas mais antigas se exceder o limite)
-    if (searchCache.size > MAX_CACHE_SIZE) {
-        const entriesToRemove = searchCache.size - MAX_CACHE_SIZE;
-        const entries = Array.from(searchCache.entries()).sort((a, b) => a[1].expiry - b[1].expiry);
-        for (let i = 0; i < entriesToRemove; i++) {
-            searchCache.delete(entries[i][0]);
-            cleanedCache++;
-        }
-    }
-
-    if (process.env.DEBUG === 'true' && (cleanedCache > 0 || cleanedSelections > 0)) {
-        console.log(`🧹 Limpeza automática: ${cleanedCache} cache(s), ${cleanedSelections} seleção(ões)`);
-    }
-}, 60 * 1000); // Executar a cada 1 minuto
-
-// Função para obter token de acesso do Spotify com refresh proativo
-async function getSpotifyAccessToken() {
-    // Se já existe uma requisição de token em andamento, aguardar ela
-    if (tokenRefreshPromise) {
-        return tokenRefreshPromise;
-    }
-
-    tokenRefreshPromise = (async () => {
+    
     try {
+        const fetch = require('node-fetch');
         const response = await fetch('https://accounts.spotify.com/api/token', {
             method: 'POST',
             headers: {
@@ -167,1869 +123,1276 @@ async function getSpotifyAccessToken() {
             body: 'grant_type=client_credentials'
         });
 
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-
         const data = await response.json();
-        
         if (data.access_token) {
-            accessToken = data.access_token;
-                // Renovar 5 minutos antes de expirar (refresh proativo)
-                const bufferTime = 5 * 60 * 1000; // 5 minutos
-                tokenExpiry = Date.now() + (data.expires_in * 1000) - bufferTime;
-            return accessToken;
+            spotifyAccessToken = data.access_token;
+            spotifyTokenExpiry = Date.now() + (data.expires_in * 1000);
+            return spotifyAccessToken;
         }
-        
-        throw new Error('Could not obtain access token');
     } catch (error) {
-            console.error('Error getting Spotify token:', error.message);
-            throw error;
-        } finally {
-            tokenRefreshPromise = null;
-        }
-    })();
-
-    return tokenRefreshPromise;
-}
-
-// Função para garantir que temos um token válido
-async function ensureAccessToken() {
-    // Renovar se expirado ou próximo de expirar (refresh proativo)
-    if (!accessToken || Date.now() >= tokenExpiry) {
-        await getSpotifyAccessToken();
+        console.error('❌ Erro ao obter token Spotify:', error.message);
     }
-    return accessToken;
+    
+    return null;
 }
 
-// Função para queryr música no Spotify com cache
-async function searchTrack(query) {
-    // Verificar cache primeiro
+// Função auxiliar para extrair artista do título (ex: "Song Name - Artist Name")
+function extractArtistFromTitle(title) {
+    if (!title) return null;
+    
+    // Padrões comuns: "Música - Artista", "Artista - Música", "Música | Artista"
+    const patterns = [
+        /^(.+?)\s*[-–—]\s*(.+?)$/,  // "Música - Artista"
+        /^(.+?)\s*\|\s*(.+?)$/,      // "Música | Artista"
+        /^(.+?)\s*by\s*(.+?)$/i,     // "Música by Artista"
+        /^(.+?)\s*feat\.?\s*(.+?)$/i, // "Música feat. Artista"
+    ];
+    
+    for (const pattern of patterns) {
+        const match = title.match(pattern);
+        if (match) {
+            // Geralmente o artista vem depois do separador
+            const artist = match[2]?.trim();
+            if (artist && artist.length > 0 && artist.length < 100) {
+                return artist;
+            }
+        }
+    }
+    
+    return null;
+}
+
+// Buscar no Spotify (retorna um único resultado)
+async function searchSpotify(query) {
     const cacheKey = query.toLowerCase().trim();
-    const cached = searchCache.get(cacheKey);
+    const cached = spotifyCache.get(cacheKey);
     if (cached && Date.now() < cached.expiry) {
-        console.log(`      💾 Result found in cache`);
         return cached.data;
     }
 
-    console.log(`      🌐 Making request to API do Spotify...`);
-    const token = await ensureAccessToken();
-    if (!token) {
-        console.error('      ❌ Spotify token not available');
-        return null;
-    }
-
+    const token = await getSpotifyToken();
+    if (!token) return null;
+    
     try {
-        const searchQuery = encodeURIComponent(query);
-        const response = await fetch(`https://api.spotify.com/v1/search?q=${searchQuery}&type=track&limit=10`, {
-            headers: {
-                'Authorization': `Bearer ${token}`
-            }
+        const fetch = require('node-fetch');
+        const response = await fetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=1`, {
+            headers: { 'Authorization': `Bearer ${token}` }
         });
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
 
         const data = await response.json();
-        const tracks = data.tracks?.items || [];
-        
-        console.log(`      ✅ Spotify returned ${tracks.length} result(s)`);
-        
-        // Armazenar no cache
-        searchCache.set(cacheKey, {
-            data: tracks,
-            expiry: Date.now() + CACHE_TTL
-        });
-
-        // Limpar cache antigo periodicamente (manter apenas últimas 100 entradas)
-        if (searchCache.size > 100) {
-            const oldestKey = searchCache.keys().next().value;
-            searchCache.delete(oldestKey);
-        }
-
-        return tracks;
-    } catch (error) {
-        console.error(`      ❌ Error searching on Spotify: ${error.message}`);
-        return [];
-    }
-}
-
-// Slash Commands
-const commands = [
-    new SlashCommandBuilder()
-        .setName('play')
-        .setDescription('Play a song in the voice channel')
-        .addStringOption(option =>
-            option.setName('query')
-                .setDescription('Song name/artist or URL (YouTube, Spotify, etc)')
-                .setRequired(true)
-        ),
-    
-    new SlashCommandBuilder()
-        .setName('stop')
-        .setDescription('Stop music playback and clear the queue'),
-    
-    new SlashCommandBuilder()
-        .setName('skip')
-        .setDescription('Skip the current song'),
-    
-    new SlashCommandBuilder()
-        .setName('pause')
-        .setDescription('Pause playback'),
-    
-    new SlashCommandBuilder()
-        .setName('resume')
-        .setDescription('Resume paused playback'),
-    
-    new SlashCommandBuilder()
-        .setName('queue')
-        .setDescription('Show the music queue')
-        .addIntegerOption(option =>
-            option.setName('page')
-                .setDescription('Page number (default: 1)')
-                .setMinValue(1)
-        ),
-    
-    new SlashCommandBuilder()
-        .setName('nowplaying')
-        .setDescription('Show the currently playing song'),
-    
-    new SlashCommandBuilder()
-        .setName('volume')
-        .setDescription('Set the bot volume (0-100)')
-        .addIntegerOption(option =>
-            option.setName('value')
-                .setDescription('Volume from 0 to 100')
-                .setMinValue(0)
-                .setMaxValue(100)
-        ),
-    
-    new SlashCommandBuilder()
-        .setName('clear')
-        .setDescription('Clear the music queue'),
-    
-    new SlashCommandBuilder()
-        .setName('shuffle')
-        .setDescription('Shuffle the music queue'),
-    
-    new SlashCommandBuilder()
-        .setName('loop')
-        .setDescription('Set loop mode')
-        .addStringOption(option =>
-            option.setName('mode')
-                .setDescription('Loop mode')
-                .setRequired(true)
-                .addChoices(
-                    { name: 'Off', value: 'off' },
-                    { name: 'Current Track', value: 'track' },
-                    { name: 'Entire Queue', value: 'queue' }
-                )
-        ),
-    
-    new SlashCommandBuilder()
-        .setName('remove')
-        .setDescription('Remove a song from the queue')
-        .addIntegerOption(option =>
-            option.setName('position')
-                .setDescription('Position of the song in queue (starts at 1)')
-                .setRequired(true)
-                .setMinValue(1)
-        ),
-    
-    new SlashCommandBuilder()
-        .setName('jump')
-        .setDescription('Jump to a specific song in the queue')
-        .addIntegerOption(option =>
-            option.setName('position')
-                .setDescription('Position of the song in queue (starts at 1)')
-                .setRequired(true)
-                .setMinValue(1)
-        ),
-    
-    new SlashCommandBuilder()
-        .setName('remove-duplicates')
-        .setDescription('Remove duplicate songs from the queue'),
-    
-    new SlashCommandBuilder()
-        .setName('seek')
-        .setDescription('Seek forward or backward in the current song')
-        .addStringOption(option =>
-            option.setName('time')
-                .setDescription('Time in MM:SS format or seconds (e.g: 1:30 or 90)')
-                .setRequired(true)
-        ),
-    
-    new SlashCommandBuilder()
-        .setName('ping')
-        .setDescription('Responds with Pong!'),
-    
-    new SlashCommandBuilder()
-        .setName('test')
-        .setDescription('Test audio playback')
-        .addStringOption(option =>
-            option.setName('url')
-                .setDescription('URL or path to audio file')
-                .setRequired(true)
-        ),
-    
-    new SlashCommandBuilder()
-        .setName('reload')
-        .setDescription('Reload commands in this server (fixes outdated commands)')
-];
-
-// Registrar comandos
-async function registerCommands() {
-    try {
-        const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-        
-        console.log('🔄 Updating slash commands...');
-        
-        // Converter comandos para formato JSON
-        const commandsData = commands.map(cmd => cmd.toJSON());
-        
-        // Tentar deletar comandos antigos primeiro (opcional, ajuda com cache)
-        try {
-            // Pegar comandos existentes
-            const existingCommands = await rest.get(
-                Routes.applicationCommands(process.env.CLIENT_ID)
-            );
+        if (data.tracks?.items?.length > 0) {
+            const track = data.tracks.items[0];
+            const result = {
+                name: track.name,
+                artist: track.artists[0]?.name || 'Unknown',
+                url: track.external_urls?.spotify || null
+            };
             
-            // Deletar comandos que não estão mais na lista
-            const commandNames = new Set(commandsData.map(c => c.name));
-            for (const cmd of existingCommands) {
-                if (!commandNames.has(cmd.name)) {
-                    try {
-                        await rest.delete(
-                            Routes.applicationCommand(process.env.CLIENT_ID, cmd.id)
-                        );
-                        console.log(`🗑️ Deleted old command: /${cmd.name}`);
-                    } catch (deleteError) {
-                        // Ignorar erros ao deletar
-                    }
-                }
-            }
-        } catch (fetchError) {
-            // Se falhar ao buscar comandos existentes, continuar mesmo assim
-            console.log('⚠️ Could not fetch existing commands, continuing...');
+            spotifyCache.set(cacheKey, {
+                data: result,
+                expiry: Date.now() + SPOTIFY_CACHE_TTL
+            });
+            
+            return result;
         }
-        
-        // Pequeno delay para evitar rate limit
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Registrar/atualizar comandos
-        const result = await rest.put(
-            Routes.applicationCommands(process.env.CLIENT_ID),
-            { body: commandsData }
-        );
-        
-        console.log(`✅ ${result.length} command(s) updated successfully!`);
-        console.log('📝 Available commands:', commands.map(cmd => `/${cmd.name}`).join(', '));
-        
-        // Avisar sobre propagação (pode levar até 1 hora)
-        console.log('⏳ Note: Command updates may take up to 1 hour to propagate globally.');
-        console.log('   If commands appear outdated, wait a few minutes and try again.');
-        console.log('   Tip: You can also use /reload in a server to refresh commands faster.');
-        
     } catch (error) {
-        console.error('❌ Error registering commands:', error);
-        
-        // Se for erro de rate limit, mostrar mensagem mais amigável
-        if (error.status === 429) {
-            const retryAfter = error.retry_after || 60;
-            console.error(`⚠️ Rate limit reached. Please wait ${retryAfter} seconds before trying again.`);
-            console.error('💡 You can restart the bot after the cooldown period.');
-        } else if (error.status === 403) {
-            console.error('❌ Forbidden: Check if the bot has "applications.commands" scope');
-            console.error('💡 Make sure you added the bot with the correct OAuth2 URL including "applications.commands"');
-        } else if (error.status === 401) {
-            console.error('❌ Unauthorized: Check if DISCORD_TOKEN is correct');
-        } else {
-            console.error('💡 Tip: Check if CLIENT_ID in .env is correct');
-            console.error(`   Error details: ${error.message}`);
-        }
+        console.error('❌ Erro na busca Spotify:', error.message);
     }
-}
-
-// Registrar comandos em um servidor específico (mais rápido que global)
-async function registerGuildCommands(guildId) {
-    try {
-        const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-        const commandsData = commands.map(cmd => cmd.toJSON());
-        
-        const result = await rest.put(
-            Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId),
-            { body: commandsData }
-        );
-        
-        return { success: true, count: result.length };
-    } catch (error) {
-        console.error(`❌ Error registering guild commands for ${guildId}:`, error.message);
-        return { success: false, error: error.message };
-    }
-}
-
-// Evento quando o bot está pronto
-client.once('ready', async () => {
-    console.log(`Bot connected as ${client.user.tag}!`);
     
-    // Obter token inicial do Spotify
-    await getSpotifyAccessToken();
+    return null;
+}
+
+// Buscar múltiplos resultados no Spotify (para diversidade de artistas)
+async function searchSpotifyMultiple(query, limit = 10) {
+    const cacheKey = `${query.toLowerCase().trim()}_multi_${limit}`;
+    const cached = spotifyCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiry) {
+        return cached.data;
+    }
+    
+    const token = await getSpotifyToken();
+    if (!token) return null;
+    
+    try {
+        const fetch = require('node-fetch');
+        const response = await fetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=${Math.min(limit, 20)}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        
+        const data = await response.json();
+        if (data.tracks?.items?.length > 0) {
+            const results = data.tracks.items.map(track => ({
+                name: track.name,
+                artist: track.artists[0]?.name || 'Unknown',
+                artists: track.artists.map(a => a.name).join(', '),
+                url: track.external_urls?.spotify || null
+            }));
+            
+            spotifyCache.set(cacheKey, {
+                data: results,
+                expiry: Date.now() + SPOTIFY_CACHE_TTL
+            });
+            
+            return results;
+        }
+    } catch (error) {
+        console.error('❌ Erro na busca múltipla Spotify:', error.message);
+    }
+    
+    return null;
+}
+
+// Registrar comandos slash
+async function registerCommands() {
+    const { REST, Routes } = require('discord.js');
+    const commands = [
+        {
+            name: 'play',
+            description: 'Toca uma música ou adiciona à fila',
+            options: [{
+                name: 'busca',
+                type: 3,
+                description: 'Nome da música, artista ou URL',
+                required: true
+            }]
+        },
+        {
+            name: 'skip',
+            description: 'Pula a música atual'
+        },
+        {
+            name: 'pause',
+            description: 'Pausa a reprodução'
+        },
+        {
+            name: 'resume',
+            description: 'Retoma a reprodução'
+        },
+        {
+            name: 'stop',
+            description: 'Para a música e limpa a fila'
+        },
+        {
+            name: 'queue',
+            description: 'Mostra a fila de músicas',
+            options: [{
+                name: 'pagina',
+                type: 4,
+                description: 'Página da fila',
+                required: false
+            }]
+        },
+        {
+            name: 'ping',
+            description: 'Verifica se o bot está online'
+        }
+    ];
+    
+        const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+    
+    try {
+        console.log('🔄 Registrando comandos slash...');
+        await rest.put(
+            Routes.applicationCommands(process.env.CLIENT_ID),
+            { body: commands }
+        );
+        console.log('✅ Comandos slash registrados');
+    } catch (error) {
+        console.error('❌ Erro ao registrar comandos:', error);
+    }
+}
+
+// Eventos do bot
+client.once('ready', async () => {
+    console.log(`✅ Bot conectado como ${client.user.tag}`);
+    console.log(`📊 Bot está em ${client.guilds.cache.size} servidores`);
     
     // Registrar comandos
     await registerCommands();
     
-    // Inicializar servidor web (interface HTML)
     try {
-        const { initWebServer } = require('../server/web-server');
-        const webServer = initWebServer(client, player);
-        if (webServer && webServer.io) {
-            socketIO = webServer.io;
-            console.log('✅ Socket.IO connected');
+        // Inicializar web server
+        initWebServer(client, player);
+        console.log('✅ Web server inicializado');
+    } catch (error) {
+        console.error('❌ Erro ao inicializar web server:', error);
+    }
+});
+
+// Armazenar mensagens de controle de música por servidor
+const nowPlayingMessages = new Map(); // guildId -> message
+
+// ⚡ PRÉ-AQUECER PRÓXIMA MÚSICA: Quando uma música começa, pré-aquecer a próxima automaticamente
+player.events.on('playerStart', async (queue, track) => {
+    // Cancelar timer de desconexão se existir (música começou a tocar)
+    const existingTimer = disconnectTimers.get(queue.guild.id);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+        disconnectTimers.delete(queue.guild.id);
+        console.log(`✅ Timer de desconexão cancelado para ${queue.guild.name} (música iniciou)`);
+    }
+    
+    const extractor = player.extractors.store.get('com.custom.youtube-extractor');
+    if (!extractor) return;
+    
+    // Pré-aquecer próxima música da fila em background
+    const nextTrack = queue.tracks.at(0);
+    if (nextTrack) {
+        try {
+            extractor.preheatStream(nextTrack.url);
+        } catch (error) {
+            // Falha silenciosa
+        }
+    }
+    
+    // Criar embed de "Now Playing" com botões de controle
+    const channel = queue.metadata?.channel || queue.channel;
+    if (!channel) return;
+    
+    try {
+        // Verificar e formatar duração corretamente
+        let durationValue = track.duration;
+        
+        // Se duration for string no formato "mm:ss" ou "hh:mm:ss", converter para segundos
+        if (typeof durationValue === 'string' && durationValue.includes(':')) {
+            const parts = durationValue.split(':').map(p => parseInt(p) || 0);
+            if (parts.length === 2) {
+                durationValue = parts[0] * 60 + parts[1];
+            } else if (parts.length === 3) {
+                durationValue = parts[0] * 3600 + parts[1] * 60 + parts[2];
+            }
+        }
+        
+        // Se duration for um objeto Duration do Discord Player, extrair msToSeconds
+        if (durationValue && typeof durationValue === 'object' && durationValue.ms !== undefined) {
+            durationValue = durationValue.ms / 1000; // Converter de ms para segundos
+        }
+        
+        const duration = formatDuration(durationValue);
+        const nextTrackInfo = queue.tracks.at(0) ? `**${queue.tracks.at(0).title}**` : 'Nenhuma';
+        
+        const embed = new EmbedBuilder()
+            .setTitle('🎵 Tocando Agora')
+            .setDescription(`**${track.title}**`)
+            .setColor(0x1DB954)
+            .setThumbnail(track.thumbnail || null)
+            .addFields(
+                { name: '👤 Artista', value: track.author || 'Unknown', inline: true },
+                { name: '⏱️ Duração', value: duration, inline: true },
+                { name: '📊 Status', value: queue.node.isPaused() ? '⏸️ Pausado' : '▶️ Reproduzindo', inline: true },
+                { name: '📋 Próxima', value: nextTrackInfo, inline: false }
+            )
+            .setFooter({ text: `Requisitado por: ${track.requestedBy?.displayName || 'Unknown'}` })
+            .setTimestamp();
+        
+        // Criar botões de controle
+        const controlButtons = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('control_pause')
+                    .setLabel(queue.node.isPaused() ? '▶️ Retomar' : '⏸️ Pausar')
+                    .setStyle(queue.node.isPaused() ? ButtonStyle.Success : ButtonStyle.Primary),
+                new ButtonBuilder()
+                    .setCustomId('control_skip')
+                    .setLabel('⏭️ Pular')
+                    .setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId('control_stop')
+                    .setLabel('⏹️ Parar')
+                    .setStyle(ButtonStyle.Danger),
+                new ButtonBuilder()
+                    .setCustomId('control_queue')
+                    .setLabel('📋 Fila')
+                    .setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId('control_refresh')
+                    .setLabel('🔄 Atualizar')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+        
+        // Enviar ou atualizar mensagem de controle
+        const existingMessage = nowPlayingMessages.get(queue.guild.id);
+        if (existingMessage) {
+            try {
+                await existingMessage.edit({ embeds: [embed], components: [controlButtons] });
+            } catch (error) {
+                // Mensagem não existe mais, criar nova
+                const message = await channel.send({ embeds: [embed], components: [controlButtons] });
+                nowPlayingMessages.set(queue.guild.id, message);
+            }
+        } else {
+            const message = await channel.send({ embeds: [embed], components: [controlButtons] });
+            nowPlayingMessages.set(queue.guild.id, message);
         }
     } catch (error) {
-        console.log('⚠️  Erro ao inicializar servidor web:', error.message);
-        console.log('   Instale as dependências: npm install express socket.io discord-oauth2 express-session');
+        console.error('Erro ao criar embed de Now Playing:', error);
     }
 });
 
-// Handler de erros não tratados
-client.on('error', (error) => {
-    // Ignorar erros de interação expirada
-    if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-        return;
-    }
-    console.error('❌ Erro no cliente:', error);
-});
-
-// Função auxiliar para criar fila de reprodução
-async function getOrCreateQueue(guild, channel, voiceChannel) {
-    let queue = player.nodes.get(guild.id);
-    if (!queue) {
-        queue = player.nodes.create(guild, {
-            metadata: {
-                channel: channel
-            },
-            leaveOnEmpty: true, // Deixar canal quando vazio (resource saving)
-            leaveOnEnd: false, // Controlamos manualmente com delay
-            leaveOnStop: true, // Deixar quando parar manualmente
-            leaveOnEmptyCooldown: 15000 // Aguardar 15 segundos antes de sair quando vazio (economia)
-        });
-    }
-
-    if (!queue.connection) {
-        // Verificar se há pessoas no canal antes de conectar (resource saving)
-        const membersInChannel = voiceChannel.members.filter(member => !member.user.bot).size;
-        
-        if (membersInChannel === 0) {
-            console.log('⚠️ Bot does not enter empty channel (resource saving)');
-            throw new Error('There are no people in the voice channel! The bot needs someone in the channel to play music.');
-        }
-        
-        try {
-            await queue.connect(voiceChannel);
-            console.log(`✅ Bot connected to channel (${membersInChannel} person(s) present)`);
-        } catch (error) {
-            console.error('❌ Error connecting to voice channel:', error.message);
-            throw new Error('Could not connect to voice channel. Check the permissions.');
-        }
-    }
-
-    return queue;
-}
-
-// Função auxiliar para adicionar e reproduzir track com logs de tempo
-async function playTrack(queue, track, startTime = null) {
-    const playStartTime = startTime || Date.now();
-    const trackTitle = track.title || 'Unknown';
-    
-    // Armazenar tempo de início para calcular quando começar a tocar
-    trackStartTimes.set(`${queue.guild.id}-${track.url}`, playStartTime);
-    
-    console.log(`\n⏱️  [TIMING] Iniciando reprodução: "${trackTitle}"`);
-    const addStart = Date.now();
-    
-    queue.addTrack(track);
-    const addTime = ((Date.now() - addStart) / 1000).toFixed(2);
-    console.log(`   ⏱️  [TIMING] Track adicionada à fila: ${addTime}s`);
-    
-    if (!queue.isPlaying()) {
-        const playCallStart = Date.now();
-        console.log(`   ⏱️  [TIMING] Chamando queue.node.play()...`);
-        
-        await queue.node.play();
-        
-        const playCallTime = ((Date.now() - playCallStart) / 1000).toFixed(2);
-        const totalTime = ((Date.now() - playStartTime) / 1000).toFixed(2);
-        console.log(`   ⏱️  [TIMING] queue.node.play() retornou: ${playCallTime}s`);
-        console.log(`   ⏱️  [TIMING] Tempo total até agora: ${totalTime}s`);
-        console.log(`   ⏱️  [TIMING] Aguardando início do áudio (playerStart event)...`);
-    }
-}
-
-// Função auxiliar para formatar duração
-function formatDuration(ms) {
-    if (!ms || isNaN(ms)) return '0:00';
-    const seconds = Math.floor(ms / 1000);
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-    
-    if (hours > 0) {
-        return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-    return `${minutes}:${secs.toString().padStart(2, '0')}`;
-}
-
-// Converter duração de string "MM:SS" ou "HH:MM:SS" para milissegundos
-function parseDurationToMs(duration) {
-    if (!duration) return 0;
-    
-    // Se já for um número, assumir que é em segundos
-    if (typeof duration === 'number') {
-        return duration * 1000;
-    }
-    
-    // Se for string, parsear formato "MM:SS" ou "HH:MM:SS"
-    if (typeof duration === 'string') {
-        const parts = duration.split(':').map(Number);
-        if (parts.length === 2) {
-            // MM:SS
-            const [minutes, seconds] = parts;
-            return (minutes * 60 + seconds) * 1000;
-        } else if (parts.length === 3) {
-            // HH:MM:SS
-            const [hours, minutes, seconds] = parts;
-            return (hours * 3600 + minutes * 60 + seconds) * 1000;
-        }
-    }
-    
-    return 0;
-}
-
-// Calcular duração total da fila
-function calculateQueueDuration(queue) {
-    if (!queue || !queue.tracks) return 0;
-    
-    let totalMs = 0;
-    
-    // Adicionar duração de todas as músicas na fila
-    for (const track of queue.tracks.toArray()) {
-        totalMs += parseDurationToMs(track.duration);
-    }
-    
-    // Adicionar duração da música atual se estiver tocando (não está na fila ainda)
-    if (queue.currentTrack) {
-        totalMs += parseDurationToMs(queue.currentTrack.duration);
-    }
-    
-    return totalMs;
-}
-
-// Eventos do Discord Player
-player.events.on('error', (queue, error) => {
-    // Ignorar erros comuns de IP discovery (não afetam a reprodução)
-    if (error.message?.includes('IP discovery') || error.message?.includes('socket closed')) {
-        return;
-    }
-    console.error('❌ Erro in queue:', error.message);
-});
-
-player.events.on('playerError', (queue, error) => {
-    // Ignorar erros comuns de IP discovery
-    if (error.message?.includes('IP discovery') || error.message?.includes('socket closed')) {
-        return;
-    }
-    console.error('❌ Erro no player:', error.message);
-});
-
-// Armazenar tempos de início para calcular tempo total até tocar
-const trackStartTimes = new Map();
-
-// Evento quando uma track começa a tocar
-player.events.on('playerStart', async (queue, track) => {
-    // Cancelar timer de saída se existir (alguém adicionou música)
-    if (endTimers.has(queue.guild.id)) {
-        clearTimeout(endTimers.get(queue.guild.id));
-        endTimers.delete(queue.guild.id);
-        console.log('✅ Timer cancelled - music playing again!');
-    }
-    
-    // Calcular tempo total até começar a tocar
-    const startTime = trackStartTimes.get(`${queue.guild.id}-${track.url}`);
-    if (startTime) {
-        const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`\n🎵 [PLAYBACK] Tocando agora: "${track.title}"`);
-        console.log(`   ⏱️  [TIMING] ⚡ TEMPO TOTAL ATÉ TOCAR: ${totalTime}s`);
-        trackStartTimes.delete(`${queue.guild.id}-${track.url}`);
-    } else {
-        console.log('🎵 Tocando agora:', track.title);
-    }
-    
-    // Emitir para Socket.IO (web interface)
-    if (socketIO) {
-        const startTime = trackStartTimes.get(`${queue.guild.id}-${track.url}`);
-        const totalTime = startTime ? ((Date.now() - startTime) / 1000).toFixed(2) : null;
-        socketIO.to(queue.guild.id).emit('playerUpdate', { 
-            action: 'playing',
-            track: {
-                title: track.title,
-                author: track.author,
-                thumbnail: track.thumbnail,
-                duration: track.duration
-            },
-            timing: totalTime ? { totalToStartSec: Number(totalTime) } : undefined
-        });
-    }
-    
-    // Enviar mensagem de "Now Playing" se temos canal de texto
-    if (queue.metadata?.channel) {
-        try {
-            const startTime = trackStartTimes.get(`${queue.guild.id}-${track.url}`);
-            const totalTime = startTime ? ((Date.now() - startTime) / 1000).toFixed(2) : null;
-            const embed = new EmbedBuilder()
-                .setTitle('🎵 Now Playing')
-                .setColor(0x1DB954)
-                .setDescription(`**${track.title}**\n🎤 ${track.author || 'Unknown'}`)
-                .setThumbnail(track.thumbnail)
-                .addFields(
-                    { name: '⏱️ Duration', value: track.duration || 'Unknown', inline: true },
-                    { name: '🎵 Queue', value: `${queue.tracks.size} track(s)`, inline: true },
-                    { name: '🔗 Link', value: `[Open on YouTube](${track.url})`, inline: true }
-                )
-                .setTimestamp();
-            if (totalTime) {
-                embed.setFooter({ text: `⚡ Started in ${totalTime}s` });
-                // limpar para evitar reutilização
-                trackStartTimes.delete(`${queue.guild.id}-${track.url}`);
-            }
-            
-            await queue.metadata.channel.send({ embeds: [embed] });
-        } catch (error) {
-            console.error('❌ Error sending now playing message:', error.message);
-        }
-    }
-});
-
-// Evento quando uma track termina
-player.events.on('audioTrackEnd', (queue, track) => {
-    // Log apenas em mode debug se necessário
-    if (process.env.DEBUG === 'true') {
-        console.log('✅ Track terminada:', track.title);
-    }
-    
-    // Se não há mais músicas in queue, o bot sairá automaticamente
-    if (queue.size === 0 && !queue.isPlaying()) {
-        if (process.env.DEBUG === 'true') {
-            console.log('📭 Empty queue, bot will leave soon to save resources');
-        }
-    }
-});
-
-// Evento quando o bot sai do canal (resource saving)
-player.events.on('disconnect', (queue) => {
-    console.log(`🔌 Bot disconnected from voice channel on server: ${queue.guild.name} (resource saving)`);
-    
-    // Limpar timer se existir
-    if (endTimers.has(queue.guild.id)) {
-        clearTimeout(endTimers.get(queue.guild.id));
-        endTimers.delete(queue.guild.id);
-    }
-});
-
-// Evento quando a fila termina completamente
-player.events.on('queueEnd', (queue) => {
-    console.log(`📭 Fila terminada no servidor: ${queue.guild.name}`);
+// Handler para quando a fila acabar (vazia)
+player.events.on('emptyQueue', (queue) => {
+    console.log(`📭 Fila vazia em ${queue.guild.name}`);
+    const channel = queue.metadata?.channel || queue.channel;
     
     // Cancelar timer anterior se existir
-    if (endTimers.has(queue.guild.id)) {
-        clearTimeout(endTimers.get(queue.guild.id));
-        endTimers.delete(queue.guild.id);
+    const existingTimer = disconnectTimers.get(queue.guild.id);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
     }
     
-    // Esperar 2 minutos antes de sair (se não adicionarem músicas)
-    const timer = setTimeout(() => {
-        if (queue && queue.connection) {
-            console.log(`⏰ Wait time expired (2 min), bot leaving channel (${queue.guild.name})`);
-            queue.delete();
-            endTimers.delete(queue.guild.id);
+    // Criar novo timer para desconectar após 2 minutos
+    const timer = setTimeout(async () => {
+        try {
+            if (queue.connection && queue.connection.state.status !== 'destroyed') {
+                queue.connection.disconnect();
+                console.log(`👋 Bot desconectado de ${queue.guild.name} após 2 minutos de inatividade`);
+                
+                // Limpar mensagem de controle
+                const message = nowPlayingMessages.get(queue.guild.id);
+                if (message) {
+        try {
+            const embed = new EmbedBuilder()
+                            .setTitle('⏹️ Fila Finalizada')
+                            .setDescription('A fila terminou e não há mais músicas para tocar.')
+                            .setColor(0x808080)
+                            .setFooter({ text: 'Bot sairá em breve se não houver atividade' })
+                .setTimestamp();
+                        await message.edit({ embeds: [embed], components: [] });
+        } catch (error) {
+                        // Mensagem pode não existir mais
+                    }
+                    nowPlayingMessages.delete(queue.guild.id);
+                }
+                
+                // Enviar mensagem no canal se disponível
+                if (channel) {
+                    try {
+                        await channel.send('⏹️ Fila finalizada. Bot sairá do canal de voz em breve.');
+                    } catch (error) {
+                        // Pode não ter permissão
+                    }
+                }
+            }
+        } catch (error) {
+            console.error(`❌ Erro ao desconectar de ${queue.guild.name}:`, error);
         }
-    }, 120000); // 2 minutos = 120000ms
+        
+        disconnectTimers.delete(queue.guild.id);
+    }, DISCONNECT_DELAY);
     
-    endTimers.set(queue.guild.id, timer);
-    console.log('⏳ Bot waiting 2 minutes... Add music to continue!');
+    disconnectTimers.set(queue.guild.id, timer);
+    console.log(`⏱️ Timer de desconexão iniciado para ${queue.guild.name} (2 minutos)`);
 });
 
-// Evento para interações
-client.on('interactionCreate', async interaction => {
-    // Handler para seleção de música do menu
-    if (interaction.isStringSelectMenu()) {
-        if (interaction.customId.startsWith('select_track_')) {
-            try {
-                // Buscar a seleção pelo customId ANTES de deferUpdate
-                const selectionData = pendingSelections.get(interaction.customId);
+// Handler para quando música adicionada à fila (cancelar timer de desconexão)
+player.events.on('audioTrackAdd', (queue, track) => {
+    console.log(`➕ Música adicionada à fila em ${queue.guild.name}: ${track.title}`);
+    
+    // Cancelar timer de desconexão se existir
+    const existingTimer = disconnectTimers.get(queue.guild.id);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+        disconnectTimers.delete(queue.guild.id);
+        console.log(`✅ Timer de desconexão cancelado para ${queue.guild.name}`);
+    }
+});
 
-                if (!selectionData) {
-                    await interaction.followUp({ 
-                        content: '❌ This selection has expired or not found. Use `/play` again.', 
-                        ephemeral: true 
-                    });
-                    return;
-                }
 
-                // Verificar se expirou
-                if (Date.now() > selectionData.expiry) {
-                    pendingSelections.delete(interaction.customId);
-                    await interaction.followUp({ 
-                        content: '❌ This selection has expired. Use `/play` again.', 
-                        ephemeral: true 
-                    });
-                    return;
-                }
+// Função para atualizar embed de Now Playing
+async function updateNowPlayingEmbed(queue) {
+    const message = nowPlayingMessages.get(queue.guild.id);
+    if (!message || !queue.currentTrack) return;
+    
+    try {
+        const track = queue.currentTrack;
+        
+        // Verificar e formatar duração corretamente
+        let durationValue = track.duration;
+        
+        // Se duration for string no formato "mm:ss" ou "hh:mm:ss", converter para segundos
+        if (typeof durationValue === 'string' && durationValue.includes(':')) {
+            const parts = durationValue.split(':').map(p => parseInt(p) || 0);
+            if (parts.length === 2) {
+                durationValue = parts[0] * 60 + parts[1];
+            } else if (parts.length === 3) {
+                durationValue = parts[0] * 3600 + parts[1] * 60 + parts[2];
+            }
+        }
+        
+        // Se duration for um objeto Duration do Discord Player, extrair msToSeconds
+        if (durationValue && typeof durationValue === 'object' && durationValue.ms !== undefined) {
+            durationValue = durationValue.ms / 1000; // Converter de ms para segundos
+        }
+        
+        const duration = formatDuration(durationValue);
+        const nextTrackInfo = queue.tracks.at(0) ? `**${queue.tracks.at(0).title}**` : 'Nenhuma';
+        
+        const embed = new EmbedBuilder()
+            .setTitle('🎵 Tocando Agora')
+            .setDescription(`**${track.title}**`)
+            .setColor(0x1DB954)
+            .setThumbnail(track.thumbnail || null)
+            .addFields(
+                { name: '👤 Artista', value: track.author || 'Unknown', inline: true },
+                { name: '⏱️ Duração', value: duration, inline: true },
+                { name: '📊 Status', value: queue.node.isPaused() ? '⏸️ Pausado' : '▶️ Reproduzindo', inline: true },
+                { name: '📋 Próxima', value: nextTrackInfo, inline: false }
+            )
+            .setFooter({ text: `Requisitado por: ${track.requestedBy?.displayName || 'Unknown'}` })
+            .setTimestamp();
+        
+        const controlButtons = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('control_pause')
+                    .setLabel(queue.node.isPaused() ? '▶️ Retomar' : '⏸️ Pausar')
+                    .setStyle(queue.node.isPaused() ? ButtonStyle.Success : ButtonStyle.Primary),
+                new ButtonBuilder()
+                    .setCustomId('control_skip')
+                    .setLabel('⏭️ Pular')
+                    .setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId('control_stop')
+                    .setLabel('⏹️ Parar')
+                    .setStyle(ButtonStyle.Danger),
+                new ButtonBuilder()
+                    .setCustomId('control_queue')
+                    .setLabel('📋 Fila')
+                    .setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId('control_refresh')
+                    .setLabel('🔄 Atualizar')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+        
+        await message.edit({ embeds: [embed], components: [controlButtons] });
+    } catch (error) {
+        // Mensagem não existe mais
+        nowPlayingMessages.delete(queue.guild.id);
+    }
+}
 
-                // Verificar se é o usuário correto
-                if (selectionData.userId !== interaction.user.id) {
-                    await interaction.followUp({ 
-                        content: '❌ This selection is not yours! Use `/play` to create your own selection.', 
-                        ephemeral: true 
-                    });
+// Handler de interações (comandos slash, botões e select menus)
+client.on('interactionCreate', async (interaction) => {
+    // Handler para botões de controle de música
+    if (interaction.isButton() && interaction.customId.startsWith('control_')) {
+        const queue = player.nodes.get(interaction.guildId);
+        if (!queue) {
+            await interaction.reply({ content: '❌ Não há música tocando!', ephemeral: true });
                     return;
                 }
                 
-                // Agora sim, fazer deferUpdate
                 await interaction.deferUpdate();
 
-                // Remover da lista de pendentes após uso
-                pendingSelections.delete(interaction.customId);
-                
-                // Cancelar timeout se ainda estiver ativo
-                if (activeTimeouts.has(interaction.customId)) {
-                    clearTimeout(activeTimeouts.get(interaction.customId));
-                    activeTimeouts.delete(interaction.customId);
-                }
-
-                const selectedIndex = parseInt(interaction.values[0]);
-                const selectedTrack = selectionData.tracks[selectedIndex];
-
-                if (!selectedTrack) {
-                    await interaction.followUp({ 
-                        content: '❌ Selected music not found.', 
-                        ephemeral: true 
-                    });
-                    return;
-                }
-
-                console.log(`\n🎵 [${interaction.user.username}#${interaction.user.discriminator}] Selected: "${selectedTrack.name}"`);
-                
-                // Mostrar mensagem de carregamento imediatamente
-                const loadingEmbed = new EmbedBuilder()
-                    .setTitle('⏳ Loading Music')
-                    .setColor(0xFFA500)
-                    .setDescription(`**${selectedTrack.name}**\n🎤 ${selectedTrack.artists.map(a => a.name).join(', ')}`)
-                    .setThumbnail(selectedTrack.album.images[0]?.url)
-                    .addFields(
-                        { name: '💿 Album', value: selectedTrack.album.name, inline: true },
-                        { name: '⏱️ Duration', value: `${Math.floor(selectedTrack.duration_ms / 60000)}:${((selectedTrack.duration_ms % 60000) / 1000).toFixed(0).padStart(2, '0')}`, inline: true }
-                    )
-                    .setFooter({ text: '🔍 Searching audio...' })
-                    .setTimestamp();
-
-                await interaction.editReply({ 
-                    embeds: [loadingEmbed], 
-                    components: [] // Remover o menu
-                });
-                
-                // Verificar se o usuário está em um canal de voz (usar o canal original ou verificar novamente)
-                let voiceChannel = interaction.member.voice.channel;
-                if (!voiceChannel) {
-                    // Tentar usar o canal armazenado
-                    const guild = interaction.guild;
-                    if (guild) {
-                        const storedChannel = guild.channels.cache.get(selectionData.voiceChannelId);
-                        if (storedChannel) {
-                            voiceChannel = storedChannel;
-                        }
-                    }
-                }
-                
-                if (!voiceChannel) {
-                    await interaction.followUp({ 
-                        content: '❌ You need to be in a voice channel!', 
-                        ephemeral: true 
-                    });
-                    return;
-                }
-
-                // Buscar áudio no YouTube
-                const searchQuery = `${selectedTrack.artists[0].name} - ${selectedTrack.name}`;
-                console.log(`   🎬 Searching audio on YouTube: "${searchQuery}"...`);
-                
-                // Atualizar embed para mostrar que está buscando
-                loadingEmbed.setFooter({ text: '🎬 Searching on YouTube...' });
-                await interaction.editReply({ embeds: [loadingEmbed] });
-                
-                // Tentar pesquisa rápida (Piped) para obter URL direta antes do player.search
-                let searchResult;
-                try {
-                    const { fastSearchUrl } = require('../utils/fast-search');
-                    const fastUrl = await fastSearchUrl(searchQuery);
-                    if (fastUrl) {
-                        searchResult = await player.search(fastUrl, { requestedBy: interaction.user });
-                    } else {
-                        searchResult = await player.search(searchQuery, { requestedBy: interaction.user });
-                    }
-                } catch (_) {
-                    searchResult = await player.search(searchQuery, { requestedBy: interaction.user });
-                }
-                // Prefetch stream em background (não aguardar)
-                try {
-                    const first = searchResult?.tracks?.[0];
-                    if (first && first.url) {
-                        const { prefetchStreamUrl } = require('../utils/youtube-extractor');
-                        prefetchStreamUrl(first.url).catch(() => {});
-                    }
-                } catch (_) {}
-
-                if (!searchResult.hasTracks()) {
-                    // Atualizar embed com erro
-                    loadingEmbed.setTitle('❌ Error Finding Audio')
-                        .setColor(0xFF0000)
-                        .setFooter({ text: 'Could not find audio' });
-                    
-                    await interaction.editReply({ embeds: [loadingEmbed] });
-                    await interaction.followUp({ 
-                        content: '⚠️ Could not find audio for this song on YouTube.', 
-                        ephemeral: true 
-                    });
-                    return;
-                }
-
-                // Atualizar embed para mostrar que encontrou e está adicionando
-                loadingEmbed.setFooter({ text: '▶️ Adding to queue...' });
-                await interaction.editReply({ embeds: [loadingEmbed] });
-
-                // Criar embed final
-                const embed = new EmbedBuilder()
-                    .setTitle('🎵 Now Playing')
-                    .setColor(0x1DB954)
-                    .setDescription(`**${selectedTrack.name}**\n🎤 ${selectedTrack.artists.map(a => a.name).join(', ')}`)
-                    .setThumbnail(selectedTrack.album.images[0]?.url)
-                    .addFields(
-                        { name: '💿 Album', value: selectedTrack.album.name, inline: true },
-                        { name: '⏱️ Duration', value: `${Math.floor(selectedTrack.duration_ms / 60000)}:${((selectedTrack.duration_ms % 60000) / 1000).toFixed(0).padStart(2, '0')}`, inline: true },
-                        { name: '🔗 Link', value: `[Open in Spotify](${selectedTrack.external_urls.spotify})`, inline: true }
-                    )
-                    .setTimestamp();
-
-                // Obter ou criar fila
-                const queue = await getOrCreateQueue(
-                    interaction.guild, 
-                    interaction.channel, 
-                    voiceChannel
-                );
-
-                const wasPlaying = queue.isPlaying();
-                const queueSize = queue.size;
-
-                // Adicionar à fila e reproduzir com timing
-                const menuStartTime = Date.now();
-                console.log(`\n⏱️  [TIMING] ===== INICIANDO PROCESSO DE REPRODUÇÃO (MENU) =====`);
-                console.log(`   ⏱️  [TIMING] Tempo inicial: ${new Date().toISOString()}`);
-                await playTrack(queue, searchResult.tracks[0], menuStartTime);
-
-                if (!wasPlaying && queue.isPlaying()) {
-                    embed.setTitle('🎵 Now Playing');
-                    embed.setFooter({ text: '✅ Song started successfully!' });
+        const control = interaction.customId.replace('control_', '');
+        
+        switch (control) {
+            case 'pause':
+                if (queue.node.isPaused()) {
+                    queue.node.resume();
                 } else {
-                    embed.setTitle('➕ Added to Queue');
-                    embed.addFields({ name: '📊 Position', value: `#${queueSize + 1} in queue`, inline: true });
-                    embed.setFooter({ text: '✅ Song added to queue!' });
+                    queue.node.pause();
+                }
+                await updateNowPlayingEmbed(queue);
+                break;
+                
+            case 'skip':
+                if (queue.tracks.size === 0) {
+                    await interaction.followUp({ content: '❌ Não há próxima música na fila!', ephemeral: true });
+                    return;
+                }
+                queue.node.skip();
+                await interaction.followUp({ content: '⏭️ Música pulada!', ephemeral: true });
+                break;
+                
+            case 'stop':
+                queue.node.stop();
+                queue.tracks.clear();
+                nowPlayingMessages.delete(interaction.guildId);
+                await interaction.followUp({ content: '⏹️ Música parada e fila limpa!', ephemeral: true });
+                break;
+                
+            case 'queue':
+                if (queue.tracks.size === 0) {
+                    await interaction.followUp({ content: '❌ A fila está vazia!', ephemeral: true });
+                    return;
                 }
 
-                // Atualizar a mensagem original com o resultado final
+                const queueList = queue.tracks.slice(0, 10).map((track, index) => 
+                    `**${index + 1}.** ${track.title} - ${track.author || 'Unknown'}`
+                ).join('\n');
+                
+                const queueEmbed = new EmbedBuilder()
+                    .setTitle('📋 Fila de Músicas')
+                    .setDescription(queueList)
+                    .setColor(0x1DB954)
+                    .setFooter({ text: `Total: ${queue.tracks.size} músicas` })
+                    .setTimestamp();
+
+                await interaction.followUp({ embeds: [queueEmbed], ephemeral: true });
+                break;
+                
+            case 'refresh':
+                await updateNowPlayingEmbed(queue);
+                await interaction.followUp({ content: '🔄 Embed atualizado!', ephemeral: true });
+                break;
+        }
+        return;
+    }
+    
+    // Handler para Select Menu de seleção de música
+    if (interaction.isStringSelectMenu() && interaction.customId === 'select_music') {
+        const selectedValue = interaction.values[0];
+        const selectionId = selectedValue.replace('select_', '');
+        const index = parseInt(selectionId);
+        
+        // Procurar seleção pendente
+        let foundSelection = null;
+        let foundKey = null;
+        
+        for (const [key, selection] of pendingSelections.entries()) {
+            if (selection.userId === interaction.user.id && Date.now() < selection.expiry) {
+                foundSelection = selection;
+                foundKey = key;
+                break;
+            }
+        }
+        
+        if (!foundSelection || index >= foundSelection.tracks.length || index < 0) {
+            await interaction.reply({ content: '❌ Seleção inválida ou expirada!', ephemeral: true });
+                    return;
+                }
+
+        const selectedTrack = foundSelection.tracks[index];
+        
+        const selectStart = Date.now();
+        console.log(`\n⏱️ [TIMING] === SELEÇÃO DE MÚSICA DO MENU ===`);
+        console.log(`⏱️ [TIMING] Track selecionado: "${selectedTrack.title}"`);
+        console.log(`⏱️ [TIMING] Usuário: ${interaction.user.tag}`);
+        
+        const deferStart = Date.now();
+        await interaction.deferUpdate();
+        const deferEnd = Date.now();
+        console.log(`⏱️ [TIMING] Button - deferUpdate: ${deferEnd - deferStart}ms`);
+        
+        try {
+            // ⚡ Stream já deve estar pré-aquecido (todas as músicas do menu são pré-aquecidas)
+            // Se não estiver, o extractor.stream() criará um novo
+            
+            // Criar ou obter queue
+            const queueStart = Date.now();
+            let queue = player.nodes.get(foundSelection.guildId);
+            if (!queue) {
+                queue = player.nodes.create(interaction.guild, {
+                    metadata: {
+                        channel: foundSelection.channel
+                    }
+                });
+            }
+            const queueEnd = Date.now();
+            console.log(`⏱️ [TIMING] Select - Obter/criar queue: ${queueEnd - queueStart}ms`);
+            
+            // Conectar ao canal de voz
+            const connectStart = Date.now();
+            if (!queue.connection) {
+                await queue.connect(foundSelection.voiceChannel);
+            }
+            const connectEnd = Date.now();
+            console.log(`⏱️ [TIMING] Select - Conectar ao canal: ${connectEnd - connectStart}ms`);
+            
+            // Adicionar à fila
+            const addStart = Date.now();
+            queue.addTrack(selectedTrack);
+            const addEnd = Date.now();
+            console.log(`⏱️ [TIMING] Select - Adicionar track: ${addEnd - addStart}ms`);
+            console.log(`📊 [DEBUG] Fila após adicionar: ${queue.tracks.size} músicas`);
+            console.log(`📊 [DEBUG] isPlaying: ${queue.isPlaying()}`);
+            
+            // Remover seleção pendente
+            pendingSelections.delete(foundKey);
+            
+            // Verificar se precisa iniciar reprodução ANTES de criar embed
+                const wasPlaying = queue.isPlaying();
+            if (!wasPlaying) {
+                console.log(`🎵 [DEBUG] Iniciando reprodução - fila não estava tocando`);
+                const playStart = Date.now();
+                await queue.node.play();
+                const playEnd = Date.now();
+                console.log(`⏱️ [TIMING] Select - Iniciar reprodução: ${playEnd - playStart}ms`);
+            }
+            
+            // Atualizar mensagem com feedback visual melhorado
+            const embedStart = Date.now();
+            const embed = new EmbedBuilder()
+                .setTitle('✅ Música selecionada!')
+                .setDescription(`**${selectedTrack.title}**`)
+                .setColor(0x1DB954);
+            
+            if (selectedTrack.thumbnail) {
+                embed.setThumbnail(selectedTrack.thumbnail);
+            }
+            
+            // Verificar e formatar duração corretamente
+            let durationValue = selectedTrack.duration;
+            if (typeof durationValue === 'string' && durationValue.includes(':')) {
+                const parts = durationValue.split(':').map(p => parseInt(p) || 0);
+                if (parts.length === 2) {
+                    durationValue = parts[0] * 60 + parts[1];
+                } else if (parts.length === 3) {
+                    durationValue = parts[0] * 3600 + parts[1] * 60 + parts[2];
+                }
+            }
+            if (durationValue && typeof durationValue === 'object' && durationValue.ms !== undefined) {
+                durationValue = durationValue.ms / 1000;
+            }
+            const duration = formatDuration(durationValue);
+            embed.addFields(
+                { name: '👤 Artista', value: selectedTrack.author || 'Unknown', inline: true },
+                { name: '⏱️ Duração', value: duration, inline: true }
+            );
+            
+            if (queue.isPlaying()) {
+                embed.addFields({ name: '📊 Status', value: '✅ Adicionada à fila', inline: false });
+                embed.setFooter({ text: `Total na fila: ${queue.tracks.size} músicas` });
+                const embedEnd = Date.now();
+                console.log(`⏱️ [TIMING] Select - Criar embed (fila): ${embedEnd - embedStart}ms`);
+                } else {
+                embed.addFields({ name: '📊 Status', value: '🎵 Tocando agora!', inline: false });
+                embed.setFooter({ text: '⚡ Stream pré-aquecido - início instantâneo!' });
+                const embedEnd = Date.now();
+                console.log(`⏱️ [TIMING] Select - Criar embed (tocando): ${embedEnd - embedStart}ms`);
+            }
+            
+            const replyStart = Date.now();
                 await interaction.editReply({ 
                     embeds: [embed], 
                     components: [] 
                 });
+            const replyEnd = Date.now();
+            console.log(`⏱️ [TIMING] Select - Enviar resposta: ${replyEnd - replyStart}ms`);
 
+            const totalTime = Date.now() - selectStart;
+            console.log(`⏱️ [TIMING] === TOTAL (seleção do menu): ${totalTime}ms ===\n`);
             } catch (error) {
-                // Ignorar erros de interação expirada (Unknown interaction)
-                if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                    console.log('⚠️ Selection interaction expired (took too long to process)');
-                    return;
-                }
-                
-                console.error('❌ Error processing selection:', error);
-                try {
-                    await interaction.followUp({ 
-                        content: '❌ Error playing selected music.', 
-                        ephemeral: true 
-                    });
-                } catch (replyError) {
-                    // Ignorar se a interação expirou
-                }
+            console.error('❌ Erro ao tocar música selecionada:', error);
+            await interaction.editReply({
+                content: `❌ Erro ao tocar música: ${error.message}`,
+                components: []
+            });
             }
             return;
-        }
     }
 
     if (!interaction.isChatInputCommand()) return;
 
+    try {
     const { commandName } = interaction;
 
-    if (commandName === 'play') {
-        const startTime = Date.now();
-        const userTag = `${interaction.user.username}#${interaction.user.discriminator}`;
-        
-        try {
-            await interaction.deferReply();
+        if (commandName === 'ping') {
+            await interaction.reply('🏓 Pong!');
+                return;
+            }
 
-            // Verificar se o usuário está em um canal de voz
-            const voiceChannel = interaction.member.voice.channel;
+        if (commandName === 'play') {
+            const query = interaction.options.getString('busca');
+            if (!query) {
+                await interaction.reply('❌ Por favor, forneça um termo de busca ou URL.');
+                return;
+            }
+            
+            const voiceChannel = interaction.member?.voice?.channel;
             if (!voiceChannel) {
-                await interaction.editReply('❌ You need to be in a voice channel to use this command!');
-                return;
-            }
-
-            let query = interaction.options.getString('query');
-            
-            // Validar e limpar query
-            if (!query || typeof query !== 'string') {
-                await interaction.reply('❌ Please provide a valid song name, artist, or URL.');
+                await interaction.reply('❌ Você precisa estar em um canal de voz!');
                 return;
             }
             
-            query = query.trim();
+            // ⚡ FEEDBACK IMEDIATO: Responder instantaneamente para melhor UX
+            // Discord tem limite de 3s para responder, então respondemos imediatamente
+            const startTime = Date.now();
+            console.log(`\n⏱️ [TIMING] === NOVA BUSCA INICIADA ===`);
+            console.log(`⏱️ [TIMING] Query: "${query}"`);
+            console.log(`⏱️ [TIMING] Usuário: ${interaction.user.tag}`);
             
-            // Limitar comprimento da query (evitar queries muito longas)
-            if (query.length > 200) {
-                query = query.substring(0, 200);
-            }
+            const stepStart = Date.now();
+            await interaction.deferReply();
+            const stepEnd = Date.now();
+            console.log(`⏱️ [TIMING] Step 1 - deferReply: ${stepEnd - stepStart}ms`);
             
-            if (query.length === 0) {
-                await interaction.reply('❌ Query cannot be empty.');
-                return;
-            }
-            
-            console.log(`\n🎵 [${userTag}] Starting search: "${query.substring(0, 50)}${query.length > 50 ? '...' : ''}"`);
-            
-            // Detectar se é URL (mais preciso: deve conter domínio válido)
-            const isUrl = /^(https?:\/\/)?(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/.test(query) || 
-                         query.toLowerCase().includes('youtube.com') || 
-                         query.toLowerCase().includes('youtu.be') ||
-                         query.toLowerCase().includes('spotify.com') ||
-                         query.toLowerCase().startsWith('http://') ||
-                         query.toLowerCase().startsWith('https://');
-            console.log(`   📍 Type detected: ${isUrl ? 'URL' : 'Song name'}`);
-            
-            let searchResult;
-            let embed;
-            let preQueue = null;
-            let isUrlFinal = isUrl; // Variável mutável para fallback
-
-            if (isUrlFinal) {
-                console.log(`   🔍 Searching audio diretamente da URL...`);
-                const urlSearchStart = Date.now();
-                
-                // Se for URL, usar diretamente o discord-player
-                try {
-                    searchResult = await player.search(query, {
-                        requestedBy: interaction.user
-                    });
-                    
-                    if (process.env.DEBUG === 'true') {
-                        console.log(`   📊 Search result:`, {
-                            hasTracks: searchResult.hasTracks(),
-                            loadType: searchResult.loadType,
-                            playlist: searchResult.playlist ? 'Sim' : 'Não'
-                        });
-                    }
-                } catch (searchError) {
-                    console.error(`   ❌ Erro na query:`, searchError.message);
-                    searchResult = { hasTracks: () => false };
-                }
-
-                const urlSearchTime = ((Date.now() - urlSearchStart) / 1000).toFixed(2);
-                
-                if (!searchResult.hasTracks()) {
-                    console.log(`   ❌ Nenhum áudio found for the URL (${urlSearchTime}s)`);
-                    console.log(`   📝 Result type: ${searchResult.loadType || 'UNKNOWN'}`);
-                    console.log(`   🔄 Trying queryr como nome de música...`);
-                    
-                    // Fallback: tentar queryr no Spotify primeiro se URL não funcionar
-                    const fallbackTracks = await searchTrack(query);
-                    if (fallbackTracks && fallbackTracks.length > 0) {
-                        const spotifyTrack = fallbackTracks[0];
-                        const searchQuery = `${spotifyTrack.artists[0].name} - ${spotifyTrack.name}`;
-                        
-                        let fallbackResult;
-                        try {
-                            const { fastSearchUrl } = require('../utils/fast-search');
-                            const fastUrl = await fastSearchUrl(searchQuery);
-                            if (fastUrl) {
-                                fallbackResult = await player.search(fastUrl, { requestedBy: interaction.user });
-                            } else {
-                                fallbackResult = await player.search(searchQuery, { requestedBy: interaction.user });
-                            }
-                        } catch (_) {
-                            fallbackResult = await player.search(searchQuery, { requestedBy: interaction.user });
-                        }
-                    try {
-                        const first = fallbackResult?.tracks?.[0];
-                        if (first && first.url) {
-                            const { prefetchStreamUrl } = require('../utils/youtube-extractor');
-                            prefetchStreamUrl(first.url).catch(() => {});
-                        }
-                    } catch (_) {}
-                        
-                        if (fallbackResult.hasTracks()) {
-                            console.log(`   ✅ Fallback found music via Spotify: "${spotifyTrack.name}"`);
-                            searchResult = fallbackResult;
-                            isUrlFinal = false; // Marcar como não URL para usar lógica de nome
-                            
-                            embed = new EmbedBuilder()
-                                .setTitle('🎵 Now Playing')
-                                .setColor(0x1DB954)
-                                .setDescription(`**${spotifyTrack.name}**\n🎤 ${spotifyTrack.artists.map(a => a.name).join(', ')}`)
-                                .setThumbnail(spotifyTrack.album.images[0]?.url)
-                                .addFields(
-                                    { name: '💿 Album', value: spotifyTrack.album.name, inline: true },
-                                    { name: '⏱️ Duration', value: `${Math.floor(spotifyTrack.duration_ms / 60000)}:${((spotifyTrack.duration_ms % 60000) / 1000).toFixed(0).padStart(2, '0')}`, inline: true },
-                                    { name: '🔗 Link', value: `[Open in Spotify](${spotifyTrack.external_urls.spotify})`, inline: true }
-                                )
-                                .setTimestamp();
-                        } else {
-                            await interaction.editReply('⚠️ Could not find audio for this URL or query.');
-                            return;
-                        }
-                    } else {
-                        await interaction.editReply('⚠️ Could not find audio for this URL or query.');
-                        return;
-                    }
-                }
-
-                // Só criar embed se não foi criado no fallback
-                if (!embed) {
-                    const track = searchResult.tracks[0];
-                    console.log(`   ✅ Audio found: "${track.title}" (${urlSearchTime}s)`);
-                    
-                    // Criar embed simples para URL
-                    embed = new EmbedBuilder()
-                        .setTitle('🎵 Now Playing')
-                        .setColor(0x1DB954)
-                        .setDescription(`**${track.title}**\n🎤 ${track.author || 'Desconhecido'}`)
-                        .setThumbnail(track.thumbnail)
-                        .addFields(
-                            { name: '⏱️ Duration', value: track.duration || 'Desconhecido', inline: true },
-                            { name: '🔗 URL', value: `[Open](${track.url})`, inline: true }
-                        )
-                        .setTimestamp();
-                }
-
-            } else {
-                // Se for nome, queryr no Spotify e preparar conexão em paralelo
-                console.log(`   🎧 Buscando no Spotify...`);
-                const spotifyStart = Date.now();
-                
-                // Iniciar query no Spotify e preparação da fila em paralelo
-                const [tracks, queuePrepared] = await Promise.all([
-                    searchTrack(query),
-                    getOrCreateQueue(interaction.guild, interaction.channel, voiceChannel).catch(() => null)
-                ]);
-                
-                preQueue = queuePrepared;
-                
-                const spotifyTime = ((Date.now() - spotifyStart) / 1000).toFixed(2);
-
-            if (!tracks || tracks.length === 0) {
-                    console.log(`   ❌ No music encontrada no Spotify (${spotifyTime}s)`);
-                await interaction.editReply('❌ No music found on Spotify!');
-                return;
-            }
-
-                // Se há múltiplas músicas, mostrar menu de seleção
-                if (tracks.length > 1) {
-                    console.log(`   📋 Found ${tracks.length} songs, showing selection menu...`);
-                    
-                    // Criar ID único para esta seleção
-                    const selectionId = `select_track_${interaction.user.id}_${Date.now()}`;
-                    
-                    // Criar menu de seleção (máximo 25 opções no Discord)
-                    const selectMenu = new StringSelectMenuBuilder()
-                        .setCustomId(selectionId)
-                        .setPlaceholder('Choose a song to play...')
-                        .addOptions(
-                            tracks.slice(0, 25).map((track, index) => {
-                                // Formatar label (máximo 100 caracteres)
-                                const label = track.name.length > 100 ? track.name.substring(0, 97) + '...' : track.name;
-                                
-                                // Formatar descrição (máximo 100 caracteres)
-                                const duration = `${Math.floor(track.duration_ms / 60000)}:${((track.duration_ms % 60000) / 1000).toFixed(0).padStart(2, '0')}`;
-                                const artistsText = track.artists.map(a => a.name).join(', ');
-                                let descriptionText = `${artistsText} • ${duration}`;
-                                
-                                // Garantir que a descrição nunca exceda 100 caracteres
-                                if (descriptionText.length > 100) {
-                                    // Reservar espaço para " • " e duração (ex: " • 7:50" = 7 caracteres)
-                                    const durationWithSeparator = ` • ${duration}`;
-                                    const maxArtistsLength = 100 - durationWithSeparator.length;
-                                    if (maxArtistsLength > 10) {
-                                        // Se couber alguns artistas, truncar a lista
-                                        descriptionText = artistsText.substring(0, maxArtistsLength - 3) + '...' + durationWithSeparator;
-                                        // Garantir que não exceda 100 (segurança extra)
-                                        if (descriptionText.length > 100) {
-                                            descriptionText = descriptionText.substring(0, 97) + '...';
-                                        }
-                                    } else {
-                                        // Se não couber, usar apenas duração
-                                        descriptionText = duration;
-                                    }
-                                }
-                                
-                                // Garantia final: nunca exceder 100 caracteres
-                                const finalDescription = descriptionText.length > 100 ? descriptionText.substring(0, 97) + '...' : descriptionText;
-                                
-                                return {
-                                    label: label,
-                                    description: finalDescription,
-                                    value: index.toString(),
-                                    emoji: '🎵'
-                                };
-                            })
-                        );
-
-                    // Armazenar as músicas timerariamente
-                    pendingSelections.set(selectionId, {
-                        tracks: tracks,
-                        userId: interaction.user.id,
-                        guildId: interaction.guild.id,
-                        channelId: interaction.channel.id,
-                        voiceChannelId: voiceChannel.id,
-                        expiry: Date.now() + SELECTION_TTL
-                    });
-
-                    // Limpar seleções expiradas
-                    for (const [id, data] of pendingSelections.entries()) {
-                        if (Date.now() > data.expiry) {
-                            pendingSelections.delete(id);
-                        }
-                    }
-
-                    // Criar embed de seleção
-                    const selectEmbed = new EmbedBuilder()
-                        .setTitle('🎵 Choose a Music')
-                        .setColor(0x1DB954)
-                        .setDescription(`Found **${tracks.length}** song(s) for **"${query}"**\n\nUse the menu below to choose which one to play:`)
-                        .setFooter({ text: 'Menu expires in 30 seconds' })
-                        .setTimestamp();
-
-                    const row = new ActionRowBuilder().addComponents(selectMenu);
-
-                    await interaction.editReply({ 
-                        embeds: [selectEmbed], 
-                        components: [row] 
-                    });
-                    
-                    // Limpar seleção após timeout (armazenar para poder cancelar se necessário)
-                    const timeoutId = setTimeout(() => {
-                        pendingSelections.delete(selectionId);
-                        activeTimeouts.delete(selectionId);
-                    }, SELECTION_TTL);
-                    activeTimeouts.set(selectionId, timeoutId);
-                    
-                    return; // Parar aqui, aguardar seleção do usuário
-                }
-
-                // Se há apenas 1 música, tocar diretamente (comportamento original)
-                const spotifyTrack = tracks[0];
-                console.log(`   ✅ Spotify: "${spotifyTrack.name}" - ${spotifyTrack.artists[0].name} (${spotifyTime}s)`);
-
-                // Criar embed com informações do Spotify
-                embed = new EmbedBuilder()
-                .setTitle('🎵 Now Playing')
+            // Mostrar mensagem de "Buscando..." imediatamente (feedback visual)
+            const loadingEmbed = new EmbedBuilder()
+                .setTitle('🔍 Buscando música...')
+                .setDescription(`**${query}**`)
                 .setColor(0x1DB954)
-                    .setDescription(`**${spotifyTrack.name}**\n🎤 ${spotifyTrack.artists.map(a => a.name).join(', ')}`)
-                    .setThumbnail(spotifyTrack.album.images[0]?.url)
-                .addFields(
-                        { name: '💿 Album', value: spotifyTrack.album.name, inline: true },
-                        { name: '⏱️ Duration', value: `${Math.floor(spotifyTrack.duration_ms / 60000)}:${((spotifyTrack.duration_ms % 60000) / 1000).toFixed(0).padStart(2, '0')}`, inline: true },
-                        { name: '🔗 Link', value: `[Open in Spotify](${spotifyTrack.external_urls.spotify})`, inline: true }
-                )
-                .setTimestamp();
-
-                // Buscar no YouTube usando o nome da música do Spotify
-                const searchQuery = `${spotifyTrack.artists[0].name} - ${spotifyTrack.name}`;
-                console.log(`   🎬 Searching audio on YouTube: "${searchQuery}"...`);
-                const youtubeStart = Date.now();
+                .setFooter({ text: 'Isso pode levar alguns segundos...' });
+            
+            const stepStart2 = Date.now();
+            await interaction.editReply({ embeds: [loadingEmbed] });
+            const stepEnd2 = Date.now();
+            console.log(`⏱️ [TIMING] Step 2 - editReply (loading): ${stepEnd2 - stepStart2}ms`);
+            
+            try {
+                // ⚡ ESTRATÉGIA OTIMIZADA: Buscar diretamente no YouTube (rápido) e usar Spotify apenas para melhorar artistas
+                // Isso é muito mais rápido que buscar cada música individualmente
+                const stepStart3 = Date.now();
+                const spotifyTracksPromise = searchSpotifyMultiple(query, 5); // Buscar apenas 5 no Spotify (em paralelo)
                 
-                try {
-                    try {
-                        const { fastSearchUrl } = require('../utils/fast-search');
-                        const fastUrl = await fastSearchUrl(searchQuery);
-                        if (fastUrl) {
-                            searchResult = await player.search(fastUrl, { requestedBy: interaction.user });
-                        } else {
-                            searchResult = await player.search(searchQuery, { requestedBy: interaction.user });
-                        }
-                    } catch (_) {
-                        searchResult = await player.search(searchQuery, { requestedBy: interaction.user });
-                    }
-                    try {
-                        const first = searchResult?.tracks?.[0];
-                        if (first && first.url) {
-                            const { prefetchStreamUrl } = require('../utils/youtube-extractor');
-                            prefetchStreamUrl(first.url).catch(() => {});
-                        }
-                    } catch (_) {}
-                    
-                    if (process.env.DEBUG === 'true') {
-                        console.log(`   📊 YouTube result:`, {
-                            hasTracks: searchResult.hasTracks(),
-                            loadType: searchResult.loadType,
-                            tracks: searchResult.hasTracks() ? searchResult.tracks.length : 0
-                        });
-                    }
-                } catch (searchError) {
-                    console.error(`   ❌ Error in YouTube search:`, searchError.message);
-                    searchResult = { hasTracks: () => false };
-                }
-
-                const youtubeTime = ((Date.now() - youtubeStart) / 1000).toFixed(2);
-
-            if (!searchResult.hasTracks()) {
-                    console.log(`   ❌ No audio found on YouTube (${youtubeTime}s)`);
-                    console.log(`   📝 Result type: ${searchResult.loadType || 'UNKNOWN'}`);
-                    console.log(`   🔄 Trying direct search as fallback (query original: "${query}")...`);
-                    
-                    // Fallback 1: tentar queryr diretamente no player sem passar pelo Spotify
-                    let fallbackResult;
-                    try {
-                        fallbackResult = await player.search(query, {
+                // Buscar diretamente no YouTube (rápido - retorna múltiplos resultados)
+                const stepStart4 = Date.now();
+                const youtubeSearchResult = await player.search(query, {
                             requestedBy: interaction.user
                         });
-                        
-                        if (process.env.DEBUG === 'true') {
-                            console.log(`   📊 Fallback 1 result:`, {
-                                hasTracks: fallbackResult.hasTracks(),
-                                loadType: fallbackResult.loadType
-                            });
+                const stepEnd4 = Date.now();
+                console.log(`⏱️ [TIMING] Step 4 - Busca YouTube: ${stepEnd4 - stepStart4}ms`);
+                
+                // Aguardar Spotify (já foi iniciado em paralelo)
+                const spotifyTracks = await spotifyTracksPromise;
+                const stepEnd3 = Date.now();
+                if (spotifyTracks && spotifyTracks.length > 0) {
+                    console.log(`⏱️ [TIMING] Step 3 - Busca Spotify (paralelo): ${stepEnd3 - stepStart3}ms (${spotifyTracks.length} resultados)`);
+                        } else {
+                    console.log(`⏱️ [TIMING] Step 3 - Busca Spotify (paralelo): ${stepEnd3 - stepStart3}ms (não encontrado)`);
                         }
-                    } catch (fallbackError) {
-                        console.error(`   ❌ Error in fallback 1:`, fallbackError.message);
-                        fallbackResult = { hasTracks: () => false };
-                    }
-                    
-                    // Fallback 2: tentar queryr apenas o nome da música (sem artista)
-                    if (!fallbackResult.hasTracks() && spotifyTrack) {
-                        console.log(`   🔄 Trying fallback 2: just song name...`);
-                        try {
-                            const fallback2Result = await player.search(spotifyTrack.name, {
-                                requestedBy: interaction.user
-                            });
-                            
-                            if (fallback2Result.hasTracks()) {
-                                console.log(`   ✅ Fallback 2 found: "${fallback2Result.tracks[0].title}"`);
-                                fallbackResult = fallback2Result;
-                            }
-                        } catch (fallback2Error) {
-                            console.error(`   ❌ Error in fallback 2:`, fallback2Error.message);
-                        }
-                    }
-                    
-                    // Fallback 3: tentar queryr com "official" ou "audio"
-                    if (!fallbackResult.hasTracks() && spotifyTrack) {
-                        console.log(`   🔄 Trying fallback 3: with additional terms...`);
-                        try {
-                            const fallback3Queries = [
-                                `${spotifyTrack.artists[0].name} ${spotifyTrack.name} official`,
-                                `${spotifyTrack.name} ${spotifyTrack.artists[0].name} audio`,
-                                `${spotifyTrack.name} official audio`
-                            ];
-                            
-                            for (const fallbackQuery of fallback3Queries) {
-                                const fallback3Result = await player.search(fallbackQuery, {
-                                    requestedBy: interaction.user
-                                });
-                                
-                                if (fallback3Result.hasTracks()) {
-                                    console.log(`   ✅ Fallback 3 found with: "${fallbackQuery}"`);
-                                    fallbackResult = fallback3Result;
-                                    break;
-                                }
-                            }
-                        } catch (fallback3Error) {
-                            console.error(`   ❌ Error in fallback 3:`, fallback3Error.message);
-                        }
-                    }
-                    
-                    if (fallbackResult && fallbackResult.hasTracks()) {
-                        console.log(`   ✅ Fallback found: "${fallbackResult.tracks[0].title}"`);
-                        searchResult = fallbackResult;
-                        
-                        // Criar embed simples para resultado do fallback
-                        embed = new EmbedBuilder()
-                            .setTitle('🎵 Now Playing')
-                            .setColor(0x1DB954)
-                            .setDescription(`**${fallbackResult.tracks[0].title}**\n🎤 ${fallbackResult.tracks[0].author || 'Unknown'}`)
-                            .setThumbnail(fallbackResult.tracks[0].thumbnail)
-                            .addFields(
-                                { name: '⏱️ Duration', value: fallbackResult.tracks[0].duration || 'Unknown', inline: true },
-                                { name: '🔗 URL', value: `[Open](${fallbackResult.tracks[0].url})`, inline: true }
-                            )
-                            .setTimestamp();
-            } else {
-                        console.log(`   ❌ All fallbacks failed`);
-                        console.log(`   💡 Tip: Try a more specific query or use a direct URL`);
-                        await interaction.editReply('⚠️ Could not find audio for this song. Try being more specific or use a YouTube/SoundCloud URL.');
+                
+                if (!youtubeSearchResult.hasTracks()) {
+                    await interaction.editReply('❌ Não foi possível encontrar a música no YouTube.');
                         return;
+                }
+                
+                const extractor = player.extractors.store.get('com.custom.youtube-extractor');
+                let allTracks = youtubeSearchResult.tracks;
+                
+                // ⚡ PRÉ-AQUECER OTIMIZADO: Iniciar streams em paralelo (não bloqueante) para TODOS os resultados
+                // Isso torna a experiência muito mais rápida!
+                if (extractor && allTracks.length > 0) {
+                    const preheatStart = Date.now();
+                    
+                    // Pré-aquecer em paralelo (não bloqueia) - apenas inicia os processos
+                    const tracksToPreheat = allTracks.slice(0, 10);
+                    
+                    tracksToPreheat.forEach(track => {
+                        if (track.url) {
+                            // Executar em background sem await (não bloqueia) - SEM LOGS durante
+                            setImmediate(() => {
+                                try {
+                                    extractor.preheatStream(track.url);
+                                } catch (error) {
+                                    // Erro silencioso
+                                }
+                            });
+                        }
+                    });
+                    
+                    const preheatEnd = Date.now();
+                    const preheatInitTime = preheatEnd - preheatStart;
+                    // Log único após iniciar tudo
+                    console.log(`⚡ [PREHEAT] Pré-aquecimento iniciado: ${tracksToPreheat.length} streams (${preheatInitTime}ms)`);
+                }
+                
+                // Melhorar artistas usando dados do Spotify (se disponível)
+                if (spotifyTracks && spotifyTracks.length > 0) {
+                    // Criar mapa de nomes de músicas para artistas do Spotify
+                    const spotifyMap = new Map();
+                    spotifyTracks.forEach(st => {
+                        const key = st.name.toLowerCase().trim();
+                        if (!spotifyMap.has(key)) {
+                            spotifyMap.set(key, st.artist);
+                        }
+                    });
+                    
+                    // Tentar melhorar artistas dos resultados do YouTube
+                    allTracks.forEach(track => {
+                        const trackTitle = track.title.toLowerCase().trim();
+                        // Tentar encontrar correspondência no Spotify
+                        for (const [spotifyName, spotifyArtist] of spotifyMap.entries()) {
+                            if (trackTitle.includes(spotifyName) || spotifyName.includes(trackTitle.split(' - ')[0])) {
+                                track.author = spotifyArtist;
+                                break;
+                            }
+                        }
+                    });
+                }
+                
+                // Criar objeto de resultado compatível com o código existente
+                const searchResult = {
+                    hasTracks: () => allTracks.length > 0,
+                    tracks: allTracks
+                };
+                
+                // ⚡ PRÉ-AQUECER IMEDIATAMENTE: Iniciar streams assim que a busca retornar
+                // Isso torna a experiência muito mais rápida!
+                // (extractor já foi obtido acima na linha 841)
+                
+                // Se encontrar múltiplas músicas (mais de 1) e não for URL, mostrar menu de seleção
+                // Se for apenas 1 resultado, tocar diretamente
+                if (searchResult.tracks.length > 1 && !query.startsWith('http')) {
+                    const stepStart5 = Date.now();
+                    console.log(`🎵 Menu de seleção: ${searchResult.tracks.length} músicas encontradas`);
+                    const tracks = searchResult.tracks.slice(0, 10); // Máximo 10 opções
+                    
+                    // ✨ Limpar/extrair artista de cada música individualmente
+                    // Isso mantém a diversidade de artistas (não aplicar o mesmo artista a todas)
+                    tracks.forEach(track => {
+                        // Primeiro, tentar extrair do título (ex: "Música - Artista")
+                        const extractedArtist = extractArtistFromTitle(track.title);
+                        if (extractedArtist) {
+                            track.author = extractedArtist;
+                        } else if (track.author) {
+                            // Limpar sufixos comuns do YouTube (VEVO, Topic, etc.)
+                            let cleanAuthor = track.author
+                                .replace(/\s*VEVO\s*$/i, '')
+                                .replace(/\s*Topic\s*$/i, '')
+                                .replace(/\s*-\s*VEVO\s*$/i, '')
+                                .replace(/\s*-\s*Topic\s*$/i, '')
+                                .trim();
+                            
+                            if (cleanAuthor && cleanAuthor !== track.author) {
+                                track.author = cleanAuthor;
+                            }
+                        }
+                    });
+                    console.log(`✨ [ARTIST] Limpando/extraindo artista dos títulos (mantendo diversidade)`);
+                    
+                    // ⚡ PRÉ-AQUECER: TODAS as músicas do menu em background (não bloqueia)!
+                    // Quando usuário escolher, stream já estará pronto!
+                    if (extractor) {
+                        const preheatStart = Date.now();
+                        
+                        // Pré-aquecer em paralelo (não bloqueia) - SEM LOGS durante
+                        tracks.forEach(track => {
+                            if (track.url) {
+                                setImmediate(() => {
+                                    try {
+                                        extractor.preheatStream(track.url);
+                                    } catch (error) {
+                                        // Erro silencioso
+                                    }
+                                });
+                            }
+                        });
+                        
+                        const preheatEnd = Date.now();
+                        const preheatInitTime = preheatEnd - preheatStart;
+                        // Log único após iniciar tudo
+                        console.log(`⚡ [PREHEAT-MENU] Pré-aquecimento iniciado: ${tracks.length} opções (${preheatInitTime}ms)`);
                     }
-                } else {
-                    console.log(`   ✅ YouTube: "${searchResult.tracks[0].title}" (${youtubeTime}s)`);
-                }
-            }
-
-            // Obter fila se ainda não foi obtida (caso de URL)
-            let queue;
-            if (isUrlFinal) {
-                console.log(`   🔗 Connecting to voice channel...`);
-                queue = await getOrCreateQueue(interaction.guild, interaction.channel, voiceChannel);
-            } else {
-                // Já foi obtida em paralelo, apenas garantir que está conectada
-                queue = preQueue;
-                if (!queue || !queue.connection) {
-                    console.log(`   🔗 Connecting to voice channel...`);
-                    queue = await getOrCreateQueue(interaction.guild, interaction.channel, voiceChannel);
-                } else {
-                    console.log(`   ✅ Connection already prepared (saved time)`);
-                }
-            }
-
-            // Verificar se já está tocando algo
-            const wasPlaying = queue.isPlaying();
-            const queueSize = queue.size;
-
-            // Adicionar à fila e reproduzir com timing
-            console.log(`\n⏱️  [TIMING] ===== INICIANDO PROCESSO DE REPRODUÇÃO =====`);
-            console.log(`   ⏱️  [TIMING] Tempo inicial: ${new Date().toISOString()}`);
-            console.log(`   ▶️ Adding to queue and starting playback...`);
-            await playTrack(queue, searchResult.tracks[0], startTime);
-
-            const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
-            
-            // Atualizar embed se não estiver tocando ainda
-            if (!wasPlaying && queue.isPlaying()) {
-                embed.setTitle('🎵 Now Playing');
-                console.log(`   ✅ Playback started! (Total: ${totalTime}s)`);
-            } else {
-                embed.setTitle('➕ Added to Queue');
-                embed.addFields({ name: '📊 Position', value: `#${queueSize + 1} in queue`, inline: true });
-                console.log(`   ✅ Added to queue at position #${queueSize + 1} (Total: ${totalTime}s)`);
-            }
-
-            await interaction.editReply({ embeds: [embed] });
-        } catch (error) {
-            // Ignorar erros de interação expirada
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error playing:', error);
-            try {
-                await interaction.editReply('❌ Error playing music.');
-            } catch (replyError) {
-                // Interação pode ter expirado, ignorar silenciosamente
-            }
-        }
-    }
-
-    if (commandName === 'stop') {
-        try {
-            const userTag = `${interaction.user.username}#${interaction.user.discriminator}`;
-            const queue = player.nodes.get(interaction.guild.id);
-            
-            if (!queue) {
-                await interaction.reply('❌ No queue to stop!');
-                return;
-            }
-            
-            if (queue.isPlaying()) {
-                queue.stop();
-            }
-            queue.clear(); // Limpar fila
-            console.log(`⏹️ [${userTag}] Stopped playback and cleared queue`);
-            
-            // O bot sairá automaticamente devido à configuração leaveOnStop: true
-            await interaction.reply('⏹️ Playback stopped and queue cleared! The bot will leave the channel automatically.');
-            
-            // Forçar desconexão após um pequeno delay para garantir resource saving
+                    
+                    // Criar embed melhorado com layout visual
+                    const embedStart = Date.now();
+                    const embed = new EmbedBuilder()
+                        .setTitle('🎵 Escolha uma música')
+                        .setDescription(`**${tracks.length}** resultados encontrados para **"${query}"**\n\n*✨ Todas as opções já estão pré-aquecidas para início instantâneo!*`)
+                        .setColor(0x1DB954)
+                        .setFooter({ text: 'Use o menu abaixo para selecionar uma música' })
+                        .setTimestamp();
+                    
+                    // Adicionar até 3 primeiras músicas como preview no embed
+                    const previewTracks = tracks.slice(0, 3);
+                    let description = `**${tracks.length}** resultados encontrados para **"${query}"**\n\n`;
+                    description += '*✨ Todas as opções já estão pré-aquecidas para início instantâneo!*\n\n';
+                    description += '**Preview:**\n';
+                    
+                    previewTracks.forEach((track, index) => {
+                        let durationValue = track.duration;
+                        if (typeof durationValue === 'string' && durationValue.includes(':')) {
+                            const parts = durationValue.split(':').map(p => parseInt(p) || 0);
+                            if (parts.length === 2) {
+                                durationValue = parts[0] * 60 + parts[1];
+                            } else if (parts.length === 3) {
+                                durationValue = parts[0] * 3600 + parts[1] * 60 + parts[2];
+                            }
+                        }
+                        if (durationValue && typeof durationValue === 'object' && durationValue.ms !== undefined) {
+                            durationValue = durationValue.ms / 1000;
+                        }
+                        const duration = formatDuration(durationValue);
+                        const title = track.title.length > 50 ? track.title.substring(0, 47) + '...' : track.title;
+                        description += `**${index + 1}.** ${title}\n` +
+                                     `   👤 ${track.author || 'Unknown'} • ⏱️ ${duration}\n\n`;
+                    });
+                    
+                    if (tracks.length > 3) {
+                        description += `*... e mais ${tracks.length - 3} opções no menu abaixo*`;
+                    }
+                    
+                    embed.setDescription(description);
+                    
+                    // Usar thumbnail da primeira música se disponível
+                    if (tracks[0]?.thumbnail) {
+                        embed.setThumbnail(tracks[0].thumbnail);
+                    }
+                    
+                    // Criar Select Menu (dropdown) - mais elegante que botões
+                    const selectMenu = new StringSelectMenuBuilder()
+                        .setCustomId('select_music')
+                        .setPlaceholder('🎵 Selecione uma música para tocar...')
+                        .setMinValues(1)
+                        .setMaxValues(1);
+                    
+                    // Adicionar opções ao select menu (máximo 25 opções)
+                    // Discord limita: Label = 100 chars, Description = 100 chars
+                    tracks.slice(0, 25).forEach((track, index) => {
+                        let durationValue = track.duration;
+                        if (typeof durationValue === 'string' && durationValue.includes(':')) {
+                            const parts = durationValue.split(':').map(p => parseInt(p) || 0);
+                            if (parts.length === 2) {
+                                durationValue = parts[0] * 60 + parts[1];
+                            } else if (parts.length === 3) {
+                                durationValue = parts[0] * 3600 + parts[1] * 60 + parts[2];
+                            }
+                        }
+                        if (durationValue && typeof durationValue === 'object' && durationValue.ms !== undefined) {
+                            durationValue = durationValue.ms / 1000;
+                        }
+                        const duration = formatDuration(durationValue);
+                        
+                        // Limpar e formatar título para o label
+                        // Limitar a 90 chars (deixar espaço para número + formatação)
+                        let cleanTitle = track.title.trim();
+                        // Remover caracteres problemáticos que podem quebrar o Discord
+                        cleanTitle = cleanTitle.replace(/[\u200B-\u200D\uFEFF]/g, ''); // Remove zero-width chars
+                        cleanTitle = cleanTitle.replace(/\s+/g, ' '); // Múltiplos espaços -> 1 espaço
+                        
+                        // Calcular espaço necessário para o número (ex: "10. " = 4 chars)
+                        const numberPrefix = `${index + 1}. `;
+                        const maxTitleLength = 100 - numberPrefix.length;
+                        
+                        if (cleanTitle.length > maxTitleLength) {
+                            cleanTitle = cleanTitle.substring(0, maxTitleLength - 3) + '...';
+                        }
+                        
+                        const label = `${index + 1}. ${cleanTitle}`;
+                        
+                        // Formatar description (artista + duração)
+                        const artist = (track.author || 'Unknown').trim();
+                        const descriptionText = `${artist} • ${duration}`;
+                        const description = descriptionText.length > 100 
+                            ? descriptionText.substring(0, 97) + '...' 
+                            : descriptionText;
+                        
+                        selectMenu.addOptions(
+                            new StringSelectMenuOptionBuilder()
+                                .setLabel(label)
+                                .setDescription(description)
+                                .setValue(`select_${index}`)
+                                .setEmoji('🎵')
+                        );
+                    });
+                    
+                    const rows = [
+                        new ActionRowBuilder().addComponents(selectMenu)
+                    ];
+                    
+                    // Armazenar seleções pendentes (usar customId do select menu)
+                    pendingSelections.set('select_music', {
+                        tracks: tracks,
+                        guildId: interaction.guildId,
+                        voiceChannel: voiceChannel,
+                        channel: interaction.channel,
+                        userId: interaction.user.id,
+                        expiry: Date.now() + SELECTION_TTL
+                    });
+                    
+                    // Limpar seleções expiradas
             setTimeout(() => {
-                if (queue && queue.connection) {
-                    queue.delete();
-                }
-            }, 2000);
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
+                        pendingSelections.delete('select_music');
+                    }, SELECTION_TTL);
+                    
+                    const embedEnd = Date.now();
+                    console.log(`⏱️ [TIMING] Step 6 - Criar embed e botões: ${embedEnd - embedStart}ms`);
+                    
+                    const replyStart = Date.now();
+                    await interaction.editReply({
+                        embeds: [embed],
+                        components: rows
+                    });
+                    const replyEnd = Date.now();
+                    console.log(`⏱️ [TIMING] Step 7 - Enviar resposta (menu): ${replyEnd - replyStart}ms`);
+                    
+                    const totalTime = Date.now() - startTime;
+                    console.log(`⏱️ [TIMING] === TOTAL (até menu): ${totalTime}ms ===\n`);
                 return;
             }
-            console.error('❌ Error stopping:', error);
-        }
-    }
-
-    if (commandName === 'skip') {
-        try {
-            const userTag = `${interaction.user.username}#${interaction.user.discriminator}`;
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || !queue.isPlaying()) {
-                await interaction.reply('❌ No music is playing!');
-                return;
-            }
             
-            const currentTrack = queue.currentTrack;
-            const skippedTitle = currentTrack.title;
-            console.log(`⏭️ [${userTag}] Skipped: "${skippedTitle}"`);
-            
-            // Verificar se há próxima música antes de pular
-            const hasNextTrack = queue.tracks.size > 0;
-            
-            // Pular a música
-            queue.node.skip();
-            
-            // Aguardar um pouco para a próxima música começar (se houver)
-            if (hasNextTrack) {
-                await new Promise(resolve => setTimeout(resolve, 800));
-            }
-            
-            // Verificar qual música está tocando agora
-            const nowPlaying = queue.currentTrack;
-            
-            if (nowPlaying && queue.isPlaying()) {
-                // Criar embed mostrando a música atual
-                const embed = new EmbedBuilder()
-                    .setTitle('⏭️ Música Pulada')
-                    .setColor(0xFF6B6B)
-                    .setDescription(`**${skippedTitle}** foi pulada`)
-                    .addFields(
-                        { name: '🎵 Now Playing', value: `**${nowPlaying.title}**\n🎤 ${nowPlaying.author || 'Desconhecido'}`, inline: false }
-                    )
-                    .setThumbnail(nowPlaying.thumbnail || currentTrack.thumbnail)
-                    .setTimestamp();
+                // Se apenas uma música ou URL, tocar diretamente
+                const track = searchResult.tracks[0];
+                console.log(`⏱️ [TIMING] Track selecionado: "${track.title}"`);
                 
-                if (nowPlaying.duration) {
-                    embed.addFields({ name: '⏱️ Duration', value: nowPlaying.duration, inline: true });
-                }
-                if (nowPlaying.url) {
-                    embed.addFields({ name: '🔗 URL', value: `[Open](${nowPlaying.url})`, inline: true });
-                }
-                if (nowPlaying.requestedBy) {
-                    embed.addFields({ name: '👤 Requested by', value: nowPlaying.requestedBy.toString(), inline: true });
+                // ✨ Usar artista do Spotify se disponível (melhor identificação)
+                // Se tivermos resultados do Spotify, usar o primeiro para o artista
+                let spotifyTrack = null;
+                if (spotifyTracks && spotifyTracks.length > 0) {
+                    spotifyTrack = spotifyTracks[0];
                 }
                 
-                await interaction.reply({ embeds: [embed] });
-            } else {
-                // Se não há próxima música, mostrar apenas que pulou
-                await interaction.reply(`⏭️ Skipped: **${skippedTitle}**\n📭 No more music in queue.`);
-            }
+                if (spotifyTrack && spotifyTrack.artist) {
+                    track.author = spotifyTrack.artist;
+                    console.log(`✨ [ARTIST] Usando artista do Spotify: ${spotifyTrack.artist}`);
+                } else {
+                    // Tentar extrair artista do título (ex: "Música - Artista")
+                    const extractedArtist = extractArtistFromTitle(track.title);
+                    if (extractedArtist) {
+                        track.author = extractedArtist;
+                        console.log(`✨ [ARTIST] Extraído do título: ${extractedArtist}`);
+                    } else if (track.author) {
+                        // Limpar sufixos comuns do YouTube (VEVO, Topic, etc.)
+                        let cleanAuthor = track.author
+                            .replace(/\s*VEVO\s*$/i, '')
+                            .replace(/\s*Topic\s*$/i, '')
+                            .replace(/\s*-\s*VEVO\s*$/i, '')
+                            .replace(/\s*-\s*Topic\s*$/i, '')
+                            .trim();
+                        
+                        if (cleanAuthor && cleanAuthor !== track.author) {
+                            track.author = cleanAuthor;
+                            console.log(`✨ [ARTIST] Limpado: ${track.author} -> ${cleanAuthor}`);
+                        }
+                    }
+                }
+                
+                // ⚡ PRÉ-AQUECER: Iniciar stream em background ANTES de criar queue (não bloqueia)
+                // Isso torna a experiência muito mais rápida!
+                const stepStart5 = Date.now();
+                if (extractor && track.url) {
+                    // Executar em background sem await (não bloqueia a execução)
+                    setImmediate(() => {
+                        try {
+                            extractor.preheatStream(track.url);
         } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error skipping:', error);
-            try {
-                await interaction.reply('❌ Error skipping music.');
-            } catch (replyError) {
-                // Ignorar se a interação expirou
-            }
-        }
-    }
-
-    if (commandName === 'pause') {
-        try {
-            const userTag = `${interaction.user.username}#${interaction.user.discriminator}`;
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || !queue.isPlaying()) {
-                await interaction.reply('❌ No music is playing!');
-                return;
-            }
-            
-            if (queue.node.isPaused()) {
-                await interaction.reply('⏸️ Music is already paused!');
-                return;
-            }
-            
-            console.log(`⏸️ [${userTag}] Pausou: "${queue.currentTrack.title}"`);
-            queue.node.pause();
-            await interaction.reply('⏸️ Music paused!');
+                            // Falha silenciosa - não é crítico
+                        }
+                    });
+                }
+                const stepEnd5 = Date.now();
+                console.log(`⚡ Pré-aquecimento iniciado (background): ${stepEnd5 - stepStart5}ms`);
+                
+                // Criar ou obter queue
+                const stepStart6 = Date.now();
+                let queue = player.nodes.get(interaction.guildId);
+                if (!queue) {
+                    queue = player.nodes.create(interaction.guild, {
+                        metadata: {
+                            channel: interaction.channel
+                        }
+                    });
+                }
+                const stepEnd6 = Date.now();
+                console.log(`⏱️ [TIMING] Step 6 - Obter/criar queue: ${stepEnd6 - stepStart6}ms`);
+                
+                // Conectar ao canal de voz
+                const stepStart7 = Date.now();
+                if (!queue.connection) {
+                    await queue.connect(voiceChannel);
+                }
+                const stepEnd7 = Date.now();
+                console.log(`⏱️ [TIMING] Step 7 - Conectar ao canal de voz: ${stepEnd7 - stepStart7}ms`);
+                
+                // Adicionar à fila
+                const stepStart8 = Date.now();
+                queue.addTrack(track);
+                const stepEnd8 = Date.now();
+                console.log(`⏱️ [TIMING] Step 8 - Adicionar track à fila: ${stepEnd8 - stepStart8}ms`);
+                console.log(`📊 [DEBUG] Fila após adicionar: ${queue.tracks.size} músicas`);
+                console.log(`📊 [DEBUG] isPlaying: ${queue.isPlaying()}`);
+                
+                // Verificar se precisa iniciar reprodução ANTES de criar embed
+                const wasPlaying = queue.isPlaying();
+                if (!wasPlaying) {
+                    console.log(`🎵 [DEBUG] Iniciando reprodução - fila não estava tocando`);
+                    const playStart = Date.now();
+                    await queue.node.play();
+                    const playEnd = Date.now();
+                    console.log(`⏱️ [TIMING] Step 9 - Iniciar reprodução (queue.node.play): ${playEnd - playStart}ms`);
+                }
+                
+                // Verificar status após adicionar e iniciar reprodução
+                const isNowPlaying = queue.isPlaying();
+                const tracksCount = queue.tracks.size;
+                
+                // ⚡ PRÉ-AQUECER: Pré-aquecer próxima música da fila
+                // Se já está tocando, a próxima é queue.tracks.at(0) (primeira na fila)
+                // Se acabou de iniciar, a próxima também é queue.tracks.at(0)
+                const nextTrack = queue.tracks.at(0);
+                if (nextTrack && extractor) {
+                    try {
+                        extractor.preheatStream(nextTrack.url);
+                        console.log(`⚡ Pré-aquecendo próxima: ${nextTrack.title}`);
         } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error pausing:', error);
-        }
-    }
-
-    if (commandName === 'resume') {
-        try {
-            const userTag = `${interaction.user.username}#${interaction.user.discriminator}`;
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || !queue.isPlaying()) {
-                await interaction.reply('❌ No music is playing!');
-                return;
-            }
-            
-            if (!queue.node.isPaused()) {
-                await interaction.reply('▶️ Music is already playing!');
-                return;
-            }
-            
-            console.log(`▶️ [${userTag}] Retomou: "${queue.currentTrack.title}"`);
-            queue.node.resume();
-            await interaction.reply('▶️ Music resumed!');
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error resuming:', error);
-        }
-    }
-
-    if (commandName === 'queue') {
-        try {
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || queue.size === 0) {
-                await interaction.reply('📭 The queue is empty!');
-                return;
-            }
-
-            const page = interaction.options.getInteger('page') || 1;
-            const pageSize = 10;
-            const totalPages = Math.ceil(queue.size / pageSize);
-            const startIndex = (page - 1) * pageSize;
-            const endIndex = Math.min(startIndex + pageSize, queue.size);
-
-            const queueList = queue.tracks.toArray().slice(startIndex, endIndex)
-                .map((track, index) => `${startIndex + index + 1}. **${track.title}** - ${track.author}`)
-                .join('\n');
-
-            const embed = new EmbedBuilder()
-                .setTitle('📋 Music Queue')
+                        console.error(`❌ Erro ao pré-aquecer: ${error.message}`);
+                    }
+                }
+                
+                const replyStart = Date.now();
+                
+                // Embed melhorado para música adicionada à fila
+                let durationValue = track.duration;
+                if (typeof durationValue === 'string' && durationValue.includes(':')) {
+                    const parts = durationValue.split(':').map(p => parseInt(p) || 0);
+                    if (parts.length === 2) {
+                        durationValue = parts[0] * 60 + parts[1];
+                    } else if (parts.length === 3) {
+                        durationValue = parts[0] * 3600 + parts[1] * 60 + parts[2];
+                    }
+                }
+                if (durationValue && typeof durationValue === 'object' && durationValue.ms !== undefined) {
+                    durationValue = durationValue.ms / 1000;
+                }
+                const duration = formatDuration(durationValue);
+                
+                // Verificar se é a primeira música (acabou de iniciar) ou se foi adicionada à fila
+                // Se não estava tocando antes e agora está, é a primeira música
+                const isFirstTrack = !wasPlaying && isNowPlaying;
+                
+                if (isFirstTrack || tracksCount === 1) {
+                    // Primeira música - está tocando agora
+                    const playingEmbed = new EmbedBuilder()
+                        .setTitle('🎵 Tocando Agora')
+                        .setDescription(`**${track.title}**`)
                 .setColor(0x1DB954)
-                .setDescription(queueList)
+                        .setThumbnail(track.thumbnail || null)
                 .addFields(
-                    { name: '📊 Total', value: `${queue.size} song(s)`, inline: true },
-                    { name: '📄 Page', value: `${page}/${totalPages}`, inline: true },
-                    { name: '⏱️ Total Duration', value: formatDuration(calculateQueueDuration(queue)), inline: true }
-                )
+                            { name: '👤 Artista', value: track.author || 'Unknown', inline: true },
+                            { name: '⏱️ Duração', value: duration, inline: true },
+                            { name: '📊 Status', value: '▶️ Reproduzindo', inline: true }
+                        )
+                        .setFooter({ text: 'Use os botões de controle abaixo ou os comandos do bot' })
                 .setTimestamp();
 
-            if (queue.currentTrack) {
-                embed.addFields({ 
-                    name: '🎵 Now Playing', 
-                    value: `**${queue.currentTrack.title}** - ${queue.currentTrack.author}`,
-                    inline: false 
-                });
-            }
-
-            await interaction.reply({ embeds: [embed] });
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error showing queue:', error);
-        }
-    }
-
-    if (commandName === 'nowplaying') {
-        try {
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || !queue.currentTrack) {
-                await interaction.reply('❌ No music is playing!');
-                return;
-            }
-
-            const track = queue.currentTrack;
-            const progress = queue.node.getTimestamp();
-            
-            const embed = new EmbedBuilder()
-                .setTitle('🎵 Now Playing')
+                    await interaction.editReply({ embeds: [playingEmbed] });
+                } else if (wasPlaying) {
+                    // Música adicionada à fila (já estava tocando outra)
+                    const queueEmbed = new EmbedBuilder()
+                        .setTitle('✅ Música Adicionada à Fila')
+                        .setDescription(`**${track.title}**`)
                 .setColor(0x1DB954)
-                .setDescription(`**${track.title}**\n🎤 ${track.author}`)
-                .setThumbnail(track.thumbnail)
+                        .setThumbnail(track.thumbnail || null)
                 .addFields(
-                    { name: '🔗 URL', value: `[Open](${track.url})`, inline: true },
-                    { name: '⏱️ Duration', value: track.duration, inline: true },
-                    { name: '👤 Requested by', value: track.requestedBy?.toString() || 'N/A', inline: true }
-                );
-
-            if (progress) {
-                embed.addFields({ 
-                    name: '⏳ Progress', 
-                    value: `${progress.current.label} / ${progress.total.label}`,
-                    inline: false 
-                });
-            }
-
-            embed.setTimestamp();
-            await interaction.reply({ embeds: [embed] });
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error showing current music:', error);
-        }
-    }
-
-    if (commandName === 'volume') {
-        try {
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || !queue.isPlaying()) {
-                await interaction.reply('❌ No music is playing!');
-                return;
-            }
-
-            const volume = interaction.options.getInteger('value');
-            if (volume !== null) {
-                queue.node.setVolume(volume);
-                await interaction.reply(`🔊 Volume set to **${volume}%**`);
+                            { name: '👤 Artista', value: track.author || 'Unknown', inline: true },
+                            { name: '⏱️ Duração', value: duration, inline: true },
+                            { name: '📍 Posição na Fila', value: `${tracksCount}`, inline: true }
+                        )
+                        .setFooter({ text: `Total de músicas na fila: ${tracksCount}` })
+                        .setTimestamp();
+                    
+                    await interaction.editReply({ embeds: [queueEmbed] });
             } else {
-                await interaction.reply(`🔊 Current volume: **${queue.node.volume}%**`);
-            }
+                    // Fallback - se não conseguiu iniciar, mostrar erro
+                    await interaction.editReply(`⏳ Iniciando reprodução... (pode levar alguns segundos)`);
+                }
+                
+                const replyEnd = Date.now();
+                console.log(`⏱️ [TIMING] Step 9 - Enviar resposta: ${replyEnd - replyStart}ms`);
+                
+                const totalTime = Date.now() - startTime;
+                console.log(`⏱️ [TIMING] === TOTAL: ${totalTime}ms ===\n`);
         } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
+                console.error('❌ Erro ao tocar música:', error);
+                await interaction.editReply(`❌ Erro ao tocar música: ${error.message}`);
             }
-            console.error('❌ Error adjusting volume:', error);
-        }
-    }
-
-    if (commandName === 'clear') {
-        try {
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || queue.size === 0) {
-                await interaction.reply('📭 The queue is already empty!');
                 return;
             }
 
-            const cleared = queue.size;
-            queue.clear();
-            await interaction.reply(`🗑️ Removed **${cleared}** song(s) from the queue!`);
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Erro ao limpar fila:', error);
-        }
-    }
-
-    if (commandName === 'shuffle') {
-        try {
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || queue.size < 2) {
-                await interaction.reply('❌ You need at least 2 songs in queue to shuffle!');
-                return;
-            }
-
-            queue.tracks.shuffle();
-            await interaction.reply('🔀 Queue shuffled!');
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Erro ao embaralhar:', error);
-        }
-    }
-
-    if (commandName === 'loop') {
-        try {
-            const queue = player.nodes.get(interaction.guild.id);
+        if (commandName === 'skip') {
+            const queue = player.nodes.get(interaction.guildId);
             if (!queue || !queue.isPlaying()) {
-                await interaction.reply('❌ No music is playing!');
+                await interaction.reply('❌ Não há música tocando!');
                 return;
             }
 
-            const mode = interaction.options.getString('mode');
-            let loopMode;
-            let modeTexto;
-
-            switch (mode) {
-                case 'track':
-                    loopMode = 1; // Repeat current track
-                    modeTexto = '🔄 Current track';
-                    break;
-                case 'queue':
-                    loopMode = 2; // Repeat entire queue
-                    modeTexto = '🔁 Entire queue';
-                    break;
-                case 'off':
-                default:
-                    loopMode = 0; // Off
-                    modeTexto = '❌ Off';
-                    break;
-            }
-
-            queue.setRepeatMode(loopMode);
-            await interaction.reply(`🔁 Repeat mode: **${modeTexto}**`);
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
+            queue.node.skip();
+            await interaction.reply('⏭️ Música pulada!');
                 return;
-            }
-            console.error('❌ Error configuring loop:', error);
         }
-    }
-
-    if (commandName === 'remove') {
-        try {
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || queue.size === 0) {
-                await interaction.reply('📭 The queue is empty!');
+        
+        if (commandName === 'pause') {
+            const queue = player.nodes.get(interaction.guildId);
+            if (!queue || !queue.isPlaying()) {
+                await interaction.reply('❌ Não há música tocando!');
                 return;
             }
 
-            const position = interaction.options.getInteger('position');
-            if (position > queue.size) {
-                await interaction.reply(`❌ Queue has only **${queue.size}** song(s)!`);
+            queue.node.pause();
+            await interaction.reply('⏸️ Pausado!');
                 return;
             }
 
-            const track = queue.tracks.at(position - 1);
-            if (!track) {
-                await interaction.reply('❌ Music not found at that position!');
+        if (commandName === 'resume') {
+            const queue = player.nodes.get(interaction.guildId);
+            if (!queue || queue.node.isPlaying()) {
+                await interaction.reply('❌ Não há música pausada!');
                 return;
             }
 
-            queue.removeTrack(track);
-            await interaction.reply(`🗑️ Removed: **${track.title}** (position ${position})`);
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
+            queue.node.resume();
+            await interaction.reply('▶️ Retomado!');
                 return;
-            }
-            console.error('❌ Error removing music:', error);
         }
-    }
-
-    if (commandName === 'jump') {
-        try {
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || queue.size === 0) {
-                await interaction.reply('📭 The queue is empty!');
+        
+        if (commandName === 'stop') {
+            const queue = player.nodes.get(interaction.guildId);
+            if (!queue) {
+                await interaction.reply('❌ Não há fila!');
                 return;
             }
 
-            const position = interaction.options.getInteger('position');
-            if (position > queue.size) {
-                await interaction.reply(`❌ Queue has only **${queue.size}** song(s)!`);
+            queue.delete();
+            await interaction.reply('⏹️ Parado e fila limpa!');
                 return;
             }
 
-            const track = queue.tracks.at(position - 1);
-            if (!track) {
-                await interaction.reply('❌ Music not found at that position!');
-                return;
-            }
-
-            // Mover a música para a posição 0 (próxima a tocar)
-            queue.node.skipTo(track);
-            await interaction.reply(`⏭️ Jumped to: **${track.title}** (position ${position})`);
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error skipping music:', error);
-        }
-    }
-
-    if (commandName === 'remove-duplicates') {
-        try {
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || queue.size === 0) {
-                await interaction.reply('📭 The queue is empty!');
+        if (commandName === 'queue') {
+            const queue = player.nodes.get(interaction.guildId);
+            if (!queue || queue.tracks.size === 0) {
+                await interaction.reply('❌ A fila está vazia!');
                 return;
             }
 
             const tracks = queue.tracks.toArray();
-            const seen = new Set();
-            let removed = 0;
-
-            // Percorrer de trás para frente para não afetar os índices
-            for (let i = tracks.length - 1; i >= 0; i--) {
-                const track = tracks[i];
-                const key = `${track.url || track.title}_${track.author}`;
-                
-                if (seen.has(key)) {
-                    queue.removeTrack(track);
-                    removed++;
-                } else {
-                    seen.add(key);
-                }
-            }
-
-            if (removed === 0) {
-                await interaction.reply('✅ No duplicate music found!');
-            } else {
-                await interaction.reply(`🗑️ Removed **${removed}** duplicate song(s)!`);
-            }
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error removing duplicates:', error);
-        }
-    }
-
-    if (commandName === 'seek') {
-        try {
-            const queue = player.nodes.get(interaction.guild.id);
-            if (!queue || !queue.isPlaying()) {
-                await interaction.reply('❌ No music is playing!');
-                return;
-            }
-
-            const time = interaction.options.getString('time');
-            let segundos = 0;
-
-            // Tentar parsear formato MM:SS
-            if (time.includes(':')) {
-                const partes = time.split(':');
-                if (partes.length === 2) {
-                    const minutos = parseInt(partes[0]) || 0;
-                    const segs = parseInt(partes[1]) || 0;
-                    segundos = minutos * 60 + segs;
-                } else if (partes.length === 3) {
-                    // Formato HH:MM:SS
-                    const horas = parseInt(partes[0]) || 0;
-                    const minutos = parseInt(partes[1]) || 0;
-                    const segs = parseInt(partes[2]) || 0;
-                    segundos = horas * 3600 + minutos * 60 + segs;
-                }
-            } else {
-                // Tentar parsear como segundos diretos
-                segundos = parseInt(time) || 0;
-            }
-
-            if (segundos < 0) {
-                await interaction.reply('❌ Time cannot be negative!');
-                return;
-            }
-
-            const currentTrack = queue.currentTrack;
-            const trackDuration = currentTrack.durationMS || 0;
+            const current = queue.currentTrack;
+            let message = `📋 **Fila de Músicas**\n\n`;
             
-            if (trackDuration > 0 && segundos > trackDuration / 1000) {
-                await interaction.reply(`❌ Time cannot be greater than the song duration (${formatDuration(trackDuration)})!`);
-                return;
+            if (current) {
+                message += `🎵 **Tocando agora:** ${current.title}\n\n`;
             }
-
-            await queue.node.seek(segundos * 1000);
             
-            const minutos = Math.floor(segundos / 60);
-            const segs = segundos % 60;
-            const timeFormatado = `${minutos}:${segs.toString().padStart(2, '0')}`;
-            
-            await interaction.reply(`⏩ Seeked to **${timeFormatado}**`);
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error seeking:', error);
-            try {
-                await interaction.reply('❌ Error seeking music. Format must be MM:SS or seconds (e.g: 1:30 or 90)');
-            } catch (replyError) {
-                // Ignorar se a interação expirou
-            }
-        }
-    }
-
-    if (commandName === 'ping') {
-        try {
-            await interaction.reply('🏓 Pong!');
-        } catch (error) {
-            // Ignorar erros de interação expirada
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error responding to ping:', error);
-        }
-    }
-
-    if (commandName === 'reload') {
-        try {
-            // Verificar se o usuário tem permissão de administrador
-            if (!interaction.member.permissions.has('Administrator')) {
-                await interaction.reply('❌ You need Administrator permission to reload commands!');
-                return;
-            }
-
-            await interaction.deferReply({ ephemeral: true });
-            
-            const guildId = interaction.guild.id;
-            const result = await registerGuildCommands(guildId);
-            
-            if (result.success) {
-                await interaction.editReply(`✅ Successfully reloaded ${result.count} command(s) in this server!\n⏳ Commands should be available immediately.`);
-            } else {
-                await interaction.editReply(`❌ Failed to reload commands: ${result.error}`);
-            }
-        } catch (error) {
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error reloading commands:', error);
-            try {
-                await interaction.editReply('❌ Error reloading commands. Please try again later.');
-            } catch (replyError) {
-                // Ignorar se a interação expirou
-            }
-        }
-    }
-
-    if (commandName === 'test') {
-        try {
-            await interaction.deferReply();
-
-            // Verificar se o usuário está em um canal de voz
-            const voiceChannel = interaction.member.voice.channel;
-            if (!voiceChannel) {
-                await interaction.editReply('❌ You need to be in a voice channel to use this command!');
-                return;
-            }
-
-            const url = interaction.options.getString('url');
-            
-            // Buscar usando Discord Player
-            const searchResult = await player.search(url, {
-                requestedBy: interaction.user
+            message += `**Próximas músicas:**\n`;
+            tracks.slice(0, 10).forEach((track, index) => {
+                message += `${index + 1}. ${track.title}\n`;
             });
-
-            if (!searchResult.hasTracks()) {
-                await interaction.editReply('⚠️ Could not find audio for this URL.');
+            
+            if (tracks.length > 10) {
+                message += `\n... e mais ${tracks.length - 10} música(s)`;
+            }
+            
+            await interaction.reply(message);
                 return;
             }
-
-            // Obter ou criar fila e conectar
-            const queue = await getOrCreateQueue(interaction.guild, interaction.channel, voiceChannel);
-
-            // Adicionar à fila e reproduzir
-            await playTrack(queue, searchResult.tracks[0]);
-
-            const embed = new EmbedBuilder()
-                .setTitle('✅ Teste de Reprodução')
-                .setColor(0x1DB954)
-                .setDescription(`**${searchResult.tracks[0].title}**`)
-                .setTimestamp();
-
-            await interaction.editReply({ embeds: [embed] });
         } catch (error) {
-            // Ignorar erros de interação expirada
-            if (error.code === 10062 || error.message?.includes('Unknown interaction')) {
-                return;
-            }
-            console.error('❌ Error playing:', error);
-            try {
-                await interaction.editReply(`❌ Error playing: ${error.message}`);
-            } catch (replyError) {
-                // Interação pode ter expirado, ignorar silenciosamente
-            }
+        console.error('❌ Erro ao processar comando:', error);
+        if (interaction.deferred || interaction.replied) {
+            await interaction.editReply(`❌ Erro: ${error.message}`).catch(() => {});
+            } else {
+            await interaction.reply(`❌ Erro: ${error.message}`).catch(() => {});
         }
     }
 });
 
-// Login
-client.login(process.env.DISCORD_TOKEN);
+client.on('error', (error) => {
+    console.error('❌ Erro do Discord:', error);
+});
+
+process.on('unhandledRejection', (error) => {
+    console.error('❌ Unhandled Rejection:', error);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    process.exit(1);
+});
+
+// Fazer login
+client.login(DISCORD_TOKEN).catch((error) => {
+    console.error('❌ Erro ao fazer login:', error);
+    console.error('Stack:', error.stack);
+    process.exit(1);
+});
+

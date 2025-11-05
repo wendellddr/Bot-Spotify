@@ -84,81 +84,28 @@ async function fastYouTubeSearch(query) {
         return cached.url;
     }
 
-    const { spawn } = require('child_process');
-    const path = require('path');
-    const fs = require('fs');
+    // Usar APENAS YouTube Data API v3 (yt-dlp removido da busca)
+    const { searchYouTubeAPI } = require('../utils/youtube-api-search');
+    const apiKey = process.env.YOUTUBE_API_KEY;
     
-    // Encontrar yt-dlp
-    let ytdlpPath = path.join(__dirname, '../utils/yt-dlp.exe');
-    if (!fs.existsSync(ytdlpPath)) {
-        ytdlpPath = 'yt-dlp';
+    if (!apiKey) {
+        console.error('   ❌ [YouTube API] YOUTUBE_API_KEY não configurada! Configure no .env');
+        return null;
     }
 
-    return new Promise((resolve) => {
-        const searchQuery = `ytsearch1:${query}`;
-        const ytdlp = spawn(ytdlpPath, [
-            '--dump-json',
-            '--no-playlist',
-            '--quiet',
-            '--no-warnings',
-            '--no-cache-dir',
-            '--skip-download',
-            '--socket-timeout', '3',
-            '--fragment-retries', '1',
-            '--retries', '1',
-            '--ignore-errors',
-            '--no-mtime',
-            '--extractor-args', 'youtube:player_client=android',
-            searchQuery
-        ], {
-            stdio: ['ignore', 'pipe', 'pipe'],
-            windowsHide: true
-        });
-        
-        let output = '';
-        let hasResolved = false;
-        const timeout = setTimeout(() => {
-            if (!hasResolved) {
-                hasResolved = true;
-                ytdlp.kill();
-                resolve(null);
-            }
-        }, 4000); // 4 segundos timeout
-        
-        ytdlp.stdout.on('data', (data) => {
-            output += data.toString();
-        });
-        
-        ytdlp.on('close', (code) => {
-            if (hasResolved) return;
-            clearTimeout(timeout);
-            
-            if (code === 0 && output) {
-                try {
-                    const info = JSON.parse(output);
-                    if (info && info.webpage_url) {
-                        youtubeSearchCache.set(cacheKey, {
-                            url: info.webpage_url,
-                            expiry: Date.now() + YT_SEARCH_CACHE_TTL
-                        });
-                        resolve(info.webpage_url);
-                        return;
-                    }
-                } catch (e) {
-                    // Ignore parse errors
-                }
-            }
-            resolve(null);
-            hasResolved = true;
-        });
-        
-        ytdlp.on('error', () => {
-            if (hasResolved) return;
-            clearTimeout(timeout);
-            resolve(null);
-            hasResolved = true;
-        });
+    const apiResult = await searchYouTubeAPI(query, apiKey);
+    if (!apiResult) {
+        console.error('   ❌ [YouTube API] Falha na busca. Verifique a API key e quota.');
+        return null;
+    }
+
+    // Armazenar no cache
+    youtubeSearchCache.set(cacheKey, {
+        url: apiResult.url,
+        expiry: Date.now() + YT_SEARCH_CACHE_TTL
     });
+
+    return apiResult.url;
 }
 
 // Get Spotify access token
@@ -757,7 +704,7 @@ function initWebServer(botClient, botPlayer) {
                         message: 'Searching for audio...'
                     });
                     
-                    // Tentar busca ultra-rápida via Piped primeiro
+                    // Buscar no YouTube
                     let youtubeUrl;
                     try {
                         const { fastSearchUrl } = require('../utils/fast-search');
@@ -776,16 +723,16 @@ function initWebServer(botClient, botPlayer) {
                         searchResult = await player.search(youtubeUrl, {
                             requestedBy: null
                         });
-                        // Prefetch do stream em background (não aguardar)
-                        try {
-                            const { prefetchStreamUrl } = require('../utils/youtube-extractor');
-                            prefetchStreamUrl(youtubeUrl).catch(() => {});
-                        } catch (_) {}
+                        // Prefetch removido - não precisamos mais obter URLs de stream
+                        // Streaming direto é mais rápido e não precisa de URL
                     } else {
-                        // Fallback para busca normal do player
-                        searchResult = await player.search(searchQuery, {
-                            requestedBy: null
+                        // Se API falhou, retornar erro (não há mais fallback yt-dlp)
+                        io.to(guildId).emit('queueUpdate', { 
+                            action: 'error', 
+                            track: trackTitle,
+                            error: 'Could not find track. YouTube API key may be missing or quota exhausted.'
                         });
+                        return res.status(404).json({ error: 'Track not found' });
                     }
                     
                     const searchDuration = Date.now() - searchStartTime;
