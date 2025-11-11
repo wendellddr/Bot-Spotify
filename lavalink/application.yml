@@ -1,0 +1,58 @@
+server:
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  server:
+    password: "youshallnotpass"
+    sources:
+      youtube: false
+      local: true
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      http: true
+    filters:
+      volume: true
+      equalizer: true
+      karaoke: true
+      timescale: true
+      tremolo: true
+      vibrato: true
+      rotation: true
+      distortion: true
+      channelMix: true
+      lowPass: true
+    bufferDurationMs: 2000
+    frameBufferDurationMs: 15000
+    opusEncodingQuality: 10
+    resamplingQuality: HIGH
+    trackStuckThresholdMs: 10000
+    useSeekGhosting: true
+    playerUpdateInterval: 5
+    youtubeConfig:
+      enableSearch: true
+      enableDirect: true
+      enableMixes: true
+      enablePlaylistSearch: true
+      clientName: "ANDROID_MUSIC"
+      cookiesFile: /opt/Lavalink/cookies.txt
+
+  plugins:
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.16.0"
+      repository: "https://maven.lavalink.dev/releases"
+
+logging:
+  level:
+    root: INFO
+    lavalink: INFO
+
+metrics:
+  prometheus:
+    enabled: false
+    endpoint: /metrics
+
+spring:
+  main:
+    banner-mode: "off"

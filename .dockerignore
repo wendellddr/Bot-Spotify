@@ -1,0 +1,20 @@
+node_modules
+npm-debug.log
+.DS_Store
+.env
+logs
+coverage
+.tmp
+.git
+.gitignore
+lavalink/application.yml
+.dashboard-cache
+
+# Dashboard artifacts
+/dashboard/node_modules
+/dashboard/.next
+/dashboard/.env.local
+/dashboard/.turbo
+
+# Misc
+*.swp

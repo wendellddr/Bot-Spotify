@@ -1,0 +1,46 @@
+server:
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  server:
+    password: "youshallnotpass"
+    sources:
+      youtube: true
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      http: true
+      local: false
+    filters: true
+    bufferDurationMs: 400
+    frameBufferDurationMs: 5000
+    opusEncodingQuality: 10
+    resamplingQuality: HIGH
+    trackStuckThresholdMs: 10000
+    useSeekGhosting: true
+    youtubeConfig:
+      email: null
+      password: null
+    playerUpdateInterval: 5
+
+  plugins:
+    # Habilite conforme necessário. Exemplo para Spotify com Lavalink 4.
+    # - dependency: "dev.arbjerg.lavalink:plugin-spotify:4.0.1"
+    #   repository: "https://maven.lavalink.dev/releases"
+
+logging:
+  level:
+    root: INFO
+    lavalink: INFO
+
+metrics:
+  prometheus:
+    enabled: false
+    endpoint: /metrics
+
+spring:
+  main:
+    banner-mode: "off"
+

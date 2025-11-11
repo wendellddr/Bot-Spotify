@@ -1,37 +1,19 @@
 {
-  "name": "music-maestro",
-  "version": "1.0.0",
-  "description": "MusicMaestro - Discord bot integrado com Spotify",
-  "main": "src/bot/index.js",
+  "name": "discord-music-bot",
+  "version": "0.1.0",
+  "description": "Minimal Discord music bot using Lavalink",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node src/bot/index.js",
-    "dev": "nodemon src/bot/index.js"
+    "start": "node src/index.js"
   },
-  "keywords": [
-    "discord",
-    "bot",
-    "spotify",
-    "music"
-  ],
+  "keywords": [],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@discord-player/extractor": "^7.1.0",
-    "@discordjs/voice": "^0.19.0",
-    "@distube/ytdl-core": "^4.16.12",
-    "@snazzah/davey": "^0.1.7",
-    "discord-oauth2": "^2.12.1",
-    "discord-player": "^7.1.0",
+    "@discordjs/rest": "^2.0.1",
     "discord.js": "^14.14.1",
     "dotenv": "^16.3.1",
-    "express": "^4.21.2",
-    "express-session": "^1.18.2",
-    "ffmpeg-static": "^5.2.0",
-    "libsodium-wrappers": "^0.7.15",
-    "node-fetch": "^2.7.0",
-    "socket.io": "^4.8.1"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.2"
+    "genius-lyrics": "^4.4.7",
+    "shoukaku": "^4.2.0"
   }
 }
